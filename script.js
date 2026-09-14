@@ -108,8 +108,6 @@ async function api(method, path, body) {
 /* =====================================================================
    UI helpers
 ===================================================================== */
-const $  = (sel, root = document) => root.querySelector(sel);
-const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
 
 function el(tag, cls, text) {
   const node = document.createElement(tag);
