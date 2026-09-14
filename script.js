@@ -20,6 +20,9 @@ const API_BASE = (
 
 const LS = { token: 'slate:token', theme: 'slate:theme', accent: 'slate:accent', members: 'slate:members' };
 
+const $  = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+
 /* =====================================================================
    STATE
 ===================================================================== */
