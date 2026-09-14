@@ -1,9 +1,6 @@
 'use strict';
 /* =====================================================================
-   slate — server.js
-   The ENTIRE backend in one file: environment, data store, presence,
-   REST routes, and Socket.io realtime events.
-   Run:   npm install   →   npm start
+   slate — server.js (entire backend in one file)
    ===================================================================== */
 
 const http = require('http');
@@ -16,11 +13,7 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { Server } = require('socket.io');
 
-/* =====================================================================
-   1 · ENVIRONMENT
-   Loads a .env file sitting NEXT TO this file (local dev only).
-   On Render, real environment variables are injected — no .env needed.
-===================================================================== */
+/* ---------- 1 · environment ---------- */
 (function loadEnvFile() {
   try {
     const file = path.join(__dirname, '.env');
@@ -30,35 +23,23 @@ const { Server } = require('socket.io');
       const m = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
       if (!m) continue;
       let val = m[2];
-      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-        val = val.slice(1, -1);
-      }
+      if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) val = val.slice(1, -1);
       if (!(m[1] in process.env)) process.env[m[1]] = val;
     }
   } catch { /* ignore */ }
 })();
 
 const PORT = Number(process.env.PORT) || 4000;
-if (!process.env.JWT_SECRET) {
-  console.warn('[slate] WARNING: JWT_SECRET is not set — using an insecure dev secret.');
-}
+if (!process.env.JWT_SECRET) console.warn('[slate] WARNING: JWT_SECRET is not set — using an insecure dev secret.');
 const SECRET = process.env.JWT_SECRET || 'dev-secret-do-not-use-in-production';
 const clientOrigins = new Set(
-  (process.env.CLIENT_ORIGIN || 'http://localhost:5500')
-    .split(',').map(s => s.trim()).filter(Boolean)
+  (process.env.CLIENT_ORIGIN || 'http://localhost:5500').split(',').map(s => s.trim()).filter(Boolean)
 );
 const isDev = process.env.NODE_ENV !== 'production';
 
-/* =====================================================================
-   2 · DATA STORE
-   Simple JSON-file persistence. A `data/` folder appears next to this
-   file the first time you run it — you never create it by hand, and
-   it's gitignored. Swap this section for Postgres/Mongo later without
-   touching anything below it.
-===================================================================== */
+/* ---------- 2 · data store ---------- */
 const DATA_DIR = path.join(__dirname, 'data');
 const DATA_FILE = path.join(DATA_DIR, 'db.json');
-
 const db = { users: {}, servers: {}, messages: [] };
 
 let saveTimer = null;
@@ -66,15 +47,10 @@ function save() {
   if (saveTimer) return;
   saveTimer = setTimeout(() => {
     saveTimer = null;
-    try {
-      fs.mkdirSync(DATA_DIR, { recursive: true });
-      fs.writeFileSync(DATA_FILE, JSON.stringify(db));
-    } catch (e) {
-      console.warn('[slate] could not persist data:', e.message);
-    }
+    try { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(DATA_FILE, JSON.stringify(db)); }
+    catch (e) { console.warn('[slate] could not persist data:', e.message); }
   }, 400);
 }
-
 try {
   if (fs.existsSync(DATA_FILE)) {
     Object.assign(db, JSON.parse(fs.readFileSync(DATA_FILE, 'utf8')));
@@ -83,20 +59,15 @@ try {
 } catch (e) { console.warn('[slate] could not load data file:', e.message); }
 
 function flushAndExit() {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(DATA_FILE, JSON.stringify(db));
-  } catch { /* ignore */ }
+  try { fs.mkdirSync(DATA_DIR, { recursive: true }); fs.writeFileSync(DATA_FILE, JSON.stringify(db)); } catch { /* ignore */ }
   process.exit(0);
 }
 process.on('SIGINT', flushAndExit);
-process.on('SIGTERM', flushAndExit); // Render sends SIGTERM before shutting down
+process.on('SIGTERM', flushAndExit);
 
-/* ---- store helpers ---- */
 const uid = () => crypto.randomUUID();
 const now = () => Date.now();
 const getUser = (id) => db.users[id] || null;
-
 function findUserByEmail(email) {
   const e = String(email).toLowerCase();
   return Object.values(db.users).find(u => u.email.toLowerCase() === e) || null;
@@ -107,80 +78,124 @@ function findUserByUsername(username) {
 }
 function publicUser(u) {
   if (!u) return null;
-  return {
-    id: u.id, username: u.username, displayName: u.displayName,
-    bio: u.bio || '', avatar: u.avatar || null, createdAt: u.createdAt
-  };
+  return { id: u.id, username: u.username, displayName: u.displayName, bio: u.bio || '', avatar: u.avatar || null, createdAt: u.createdAt };
 }
 const selfUser = (u) => ({ ...publicUser(u), email: u.email });
 function dmRoomKey(a, b) { const [x, y] = [a, b].sort(); return `dm:${x}:${y}`; }
 function findServerByChannel(channelId) {
-  for (const s of Object.values(db.servers)) {
-    if (s.channels.some(c => c.id === channelId)) return s;
-  }
+  for (const s of Object.values(db.servers)) if (s.channels.some(c => c.id === channelId)) return s;
   return null;
 }
 function inviteCode() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no ambiguous chars
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
   const bytes = crypto.randomBytes(6);
   let code = '';
   for (const b of bytes) code += chars[b % chars.length];
   return code;
 }
 
-/* =====================================================================
-   3 · PRESENCE  (who is online — shared by REST routes and sockets)
-===================================================================== */
+/* message helpers (replies / mentions / images / deletion) */
+function messagePayload(m) {
+  const out = { ...m, author: publicUser(getUser(m.authorId)) };
+  if (m.replyTo) {
+    const r = db.messages.find(x => x.id === m.replyTo);
+    out.replyPreview = r ? {
+      id: r.id, authorId: r.authorId, deleted: !!r.deleted,
+      text: r.deleted ? null : String(r.text || '').slice(0, 120),
+      image: !r.deleted && !!r.image
+    } : null;
+  }
+  return out;
+}
+function parseMentions(text, contextUserIds) {
+  const found = new Set();
+  const re = /@([a-zA-Z0-9_]{3,20})/g;
+  let m;
+  while ((m = re.exec(String(text || '')))) {
+    const u = findUserByUsername(m[1]);
+    if (u && contextUserIds.includes(u.id)) found.add(u.id);
+  }
+  return [...found];
+}
+function validImage(img) {
+  if (img == null) return true;
+  if (typeof img !== 'string') return false;
+  if (img.startsWith('data:image/') && img.length < 520000) return true;
+  if (/^https:\/\/\S+$/.test(img) && img.length < 600) return true; // Tenor GIF urls
+  return false;
+}
+function notifyMentions(message, place) {
+  for (const mid of message.mentions || []) {
+    if (mid === message.authorId) continue;
+    io.to('user:' + mid).emit('mention', {
+      from: publicUser(getUser(message.authorId)),
+      place,
+      text: String(message.text || '').slice(0, 80),
+      info: place.type === 'channel'
+        ? { type: 'channel', channelId: place.channelId }
+        : { type: 'dm', userIds: place.userIds }
+    });
+  }
+}
+
+/* official server — every new signup gets added automatically */
+function ensureOfficialServer() {
+  let s = Object.values(db.servers).find(x => x.official);
+  if (!s) {
+    s = {
+      id: uid(), name: 'Slate Official', ownerId: 'system', official: true,
+      memberIds: [], inviteCode: 'SLATE1',
+      channels: [{ id: uid(), name: 'general', createdAt: now() }, { id: uid(), name: 'introductions', createdAt: now() }]
+    };
+    db.servers[s.id] = s;
+  }
+  return s;
+}
+function ensureOfficialMembership(user) {
+  const s = ensureOfficialServer();
+  if (!s.memberIds.includes(user.id)) { s.memberIds.push(user.id); save(); }
+}
+
+/* ---------- 3 · presence ---------- */
 const socketsByUser = new Map();
 const presence = {
   add(socket) {
     if (!socketsByUser.has(socket.userId)) socketsByUser.set(socket.userId, new Set());
     socketsByUser.get(socket.userId).add(socket.id);
-    return socketsByUser.get(socket.userId).size === 1; // true = user just came online
+    return socketsByUser.get(socket.userId).size === 1;
   },
   remove(socket) {
     const set = socketsByUser.get(socket.userId);
     if (!set) return false;
     set.delete(socket.id);
-    if (set.size === 0) { socketsByUser.delete(socket.userId); return true; } // user went offline
+    if (set.size === 0) { socketsByUser.delete(socket.userId); return true; }
     return false;
   },
   isOnline(userId) { return socketsByUser.has(userId); }
 };
 
-/* =====================================================================
-   4 · EXPRESS APP + CORS
-===================================================================== */
+/* ---------- 4 · express + cors ---------- */
 const app = express();
 const httpServer = http.createServer(app);
 
-// CLIENT_ORIGIN (comma-separated list) + any localhost port for development.
-// IMPORTANT: origins are scheme + host only — no path. Your GitHub Pages
-// site lives at https://<username>.github.io/<repo>, but its ORIGIN is
-// just https://<username>.github.io
 const originFn = (origin, cb) => {
-  if (!origin) return cb(null, true); // curl / same-origin requests
-  if (clientOrigins.has(origin) || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) {
-    return cb(null, true);
-  }
+  if (!origin) return cb(null, true);
+  if (clientOrigins.has(origin) || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(origin)) return cb(null, true);
   return cb(new Error('Blocked by CORS'));
 };
 app.use(cors({ origin: originFn, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }));
-app.use(express.json({ limit: '512kb' }));
+app.use(express.json({ limit: '2mb' })); // bigger limit so image messages fit
 
 if (isDev) {
-  app.use((req, res, next) => {
-    res.on('finish', () => console.log(req.method, req.originalUrl, res.statusCode));
-    next();
-  });
+  app.use((req, res, next) => { res.on('finish', () => console.log(req.method, req.originalUrl, res.statusCode)); next(); });
 }
 
-/* =====================================================================
-   5 · SOCKET.IO  (realtime: messages, typing, presence, notifications)
-===================================================================== */
-const io = new Server(httpServer, { cors: { origin: originFn, methods: ['GET', 'POST'] } });
+/* ---------- 5 · socket.io ---------- */
+const io = new Server(httpServer, {
+  cors: { origin: originFn, methods: ['GET', 'POST'] },
+  maxHttpBufferSize: 2e6
+});
 
-// handshake auth — the token arrives from the client's `auth` option
 io.use((socket, next) => {
   const token = socket.handshake.auth && socket.handshake.auth.token;
   if (!token) return next(new Error('auth'));
@@ -192,12 +207,11 @@ io.use((socket, next) => {
   } catch { next(new Error('auth')); }
 });
 
-const lastMessageAt = new Map(); // simple per-user flood control
+const lastMessageAt = new Map();
 
 io.on('connection', (socket) => {
   const me = () => getUser(socket.userId);
 
-  // personal room (DMs, notifications) + one room per server
   socket.join('user:' + socket.userId);
   for (const s of Object.values(db.servers)) {
     if (s.memberIds.includes(socket.userId)) socket.join('server:' + s.id);
@@ -208,41 +222,74 @@ io.on('connection', (socket) => {
     const user = me(); if (!user) return;
     const p = payload || {};
     const text = typeof p.text === 'string' ? p.text.trim().slice(0, 2000) : '';
-    if (!text) return;
-    if (Date.now() - (lastMessageAt.get(user.id) || 0) < 250) return; // slow down
+    const image = validImage(p.image) ? p.image : null;
+    if (!text && !image) return;
+    if (Date.now() - (lastMessageAt.get(user.id) || 0) < 250) return;
     lastMessageAt.set(user.id, Date.now());
 
     if (p.roomType === 'channel') {
       const server = findServerByChannel(p.target);
       if (!server || !server.memberIds.includes(user.id)) return;
+      let replyTo = null;
+      if (p.replyTo) {
+        const r = db.messages.find(x => x.id === p.replyTo);
+        if (r && r.type === 'channel' && r.room === p.target && !r.deleted) replyTo = r.id;
+      }
+      const channelName = (server.channels.find(c => c.id === p.target) || {}).name || 'channel';
       const message = {
-        id: uid(), type: 'channel', room: p.target,
-        authorId: user.id, text, createdAt: now()
+        id: uid(), type: 'channel', room: p.target, authorId: user.id,
+        text, image, replyTo, deleted: false,
+        mentions: parseMentions(text, server.memberIds), createdAt: now()
       };
-      db.messages.push(message);
-      save();
+      db.messages.push(message); save();
       io.to('server:' + server.id).emit('message:new', {
-        ...message,
-        author: publicUser(user),
+        ...messagePayload(message),
         info: { type: 'channel', serverId: server.id, channelId: p.target }
       });
+      notifyMentions(message, { type: 'channel', channelId: p.target, channelName });
       if (typeof ack === 'function') ack({ ok: true, id: message.id });
 
     } else if (p.roomType === 'dm') {
       const peer = getUser(p.target);
       if (!peer || !user.friends.includes(peer.id)) return;
+      let replyTo = null;
+      if (p.replyTo) {
+        const r = db.messages.find(x => x.id === p.replyTo);
+        if (r && r.type === 'dm' && r.room === dmRoomKey(user.id, peer.id) && !r.deleted) replyTo = r.id;
+      }
       const message = {
-        id: uid(), type: 'dm', room: dmRoomKey(user.id, peer.id),
-        authorId: user.id, text, createdAt: now()
+        id: uid(), type: 'dm', room: dmRoomKey(user.id, peer.id), authorId: user.id,
+        text, image, replyTo, deleted: false,
+        mentions: parseMentions(text, [user.id, peer.id]), createdAt: now()
       };
-      db.messages.push(message);
-      save();
+      db.messages.push(message); save();
       io.to('user:' + user.id).to('user:' + peer.id).emit('message:new', {
-        ...message,
-        author: publicUser(user),
+        ...messagePayload(message),
         info: { type: 'dm', userIds: [user.id, peer.id] }
       });
+      notifyMentions(message, { type: 'dm', userIds: [user.id, peer.id] });
       if (typeof ack === 'function') ack({ ok: true, id: message.id });
+    }
+  });
+
+  socket.on('message:delete', (payload) => {
+    const user = me(); if (!user) return;
+    const m = db.messages.find(x => x.id === (payload && payload.id));
+    if (!m || m.deleted) return;
+
+    if (m.type === 'channel') {
+      const server = findServerByChannel(m.room);
+      if (!server || !server.memberIds.includes(user.id)) return;
+      if (m.authorId !== user.id && server.ownerId !== user.id) return; // author or server owner
+      m.deleted = true; m.text = ''; m.image = null; m.replyTo = null; m.mentions = [];
+      save();
+      io.to('server:' + server.id).emit('message:delete', { id: m.id, type: 'channel', room: m.room });
+    } else if (m.type === 'dm') {
+      const [a, b] = m.room.slice(3).split(':');
+      if (user.id !== a && user.id !== b) return; // either participant may delete
+      m.deleted = true; m.text = ''; m.image = null; m.replyTo = null; m.mentions = [];
+      save();
+      io.to('user:' + a).to('user:' + b).emit('message:delete', { id: m.id, type: 'dm', room: m.room });
     }
   });
 
@@ -254,37 +301,29 @@ io.on('connection', (socket) => {
       const server = findServerByChannel(p.target);
       if (!server || !server.memberIds.includes(user.id)) return;
       socket.to('server:' + server.id).emit('typing', {
-        roomType: 'channel', room: p.target,
-        userId: user.id, displayName: user.displayName, isTyping
+        roomType: 'channel', room: p.target, userId: user.id, displayName: user.displayName, isTyping
       });
     } else if (p.roomType === 'dm') {
       const peer = getUser(p.target);
       if (!peer || !user.friends.includes(peer.id)) return;
       socket.to('user:' + peer.id).emit('typing', {
-        roomType: 'dm', room: dmRoomKey(user.id, peer.id),
-        userId: user.id, displayName: user.displayName, isTyping
+        roomType: 'dm', room: dmRoomKey(user.id, peer.id), userId: user.id, displayName: user.displayName, isTyping
       });
     }
   });
 
   socket.on('disconnect', () => {
-    if (presence.remove(socket)) {
-      io.emit('presence:update', { userId: socket.userId, online: false });
-    }
+    if (presence.remove(socket)) io.emit('presence:update', { userId: socket.userId, online: false });
   });
 });
 
-// keep every socket of a user in sync with their server memberships
-// (used by the REST routes below when they join/create/leave)
 function syncRooms(userId, room, join) {
   for (const sock of io.of('/').sockets.values()) {
     if (sock.userId === userId) (join ? sock.join(room) : sock.leave(room));
   }
 }
 
-/* =====================================================================
-   6 · REST API
-===================================================================== */
+/* ---------- 6 · REST API ---------- */
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const USERNAME_RE = /^[a-zA-Z0-9_]{3,20}$/;
 
@@ -298,30 +337,26 @@ function auth(req, res, next) {
     if (!user) return res.status(401).json({ error: 'Account not found' });
     req.user = user;
     next();
-  } catch {
-    return res.status(401).json({ error: 'Session expired — sign in again' });
-  }
+  } catch { return res.status(401).json({ error: 'Session expired — sign in again' }); }
 }
-
 const issueToken = (user) => jwt.sign({ uid: user.id }, SECRET, { expiresIn: '7d' });
 const bad = (res, code, msg) => res.status(code).json({ error: msg });
 const withOnline = (u) => ({ ...publicUser(u), online: presence.isOnline(u.id) });
 
 function friendState(me, other) {
   if (me.friends.includes(other.id)) return 'friend';
-  if (me.incoming.includes(other.id)) return 'incoming'; // they sent me a request
+  if (me.incoming.includes(other.id)) return 'incoming';
   if (me.outgoing.includes(other.id)) return 'outgoing';
   return 'none';
 }
-
 function serializeServer(s) {
   return {
     id: s.id, name: s.name, inviteCode: s.inviteCode, ownerId: s.ownerId,
+    official: !!s.official, icon: s.icon || null,
     channels: s.channels.map(c => ({ id: c.id, name: c.name })),
     members: s.memberIds.map(id => getUser(id)).filter(Boolean).map(withOnline)
   };
 }
-
 function history(req, type, room) {
   const before = Number(req.query.before) || Infinity;
   const list = db.messages
@@ -330,34 +365,31 @@ function history(req, type, room) {
     .slice(0, 50);
   list.reverse();
   const users = {};
-  for (const m of list) if (!users[m.authorId]) users[m.authorId] = publicUser(getUser(m.authorId));
-  return { messages: list, users };
+  for (const m of list) {
+    if (!users[m.authorId]) users[m.authorId] = publicUser(getUser(m.authorId));
+    for (const mid of (m.mentions || [])) if (!users[mid]) users[mid] = publicUser(getUser(mid));
+  }
+  return { messages: list.map(messagePayload), users };
 }
 
-/* ---------- auth ---------- */
+/* ---- auth ---- */
 app.post('/api/auth/signup', async (req, res) => {
   const { email, username, displayName, password } = req.body || {};
   if (!email || !EMAIL_RE.test(email)) return bad(res, 400, 'Enter a valid email address');
-  if (!username || !USERNAME_RE.test(username)) {
-    return bad(res, 400, 'Username must be 3–20 characters (letters, numbers, underscore)');
-  }
-  if (!password || typeof password !== 'string' || password.length < 8) {
-    return bad(res, 400, 'Password must be at least 8 characters');
-  }
+  if (!username || !USERNAME_RE.test(username)) return bad(res, 400, 'Username must be 3–20 characters (letters, numbers, underscore)');
+  if (!password || typeof password !== 'string' || password.length < 8) return bad(res, 400, 'Password must be at least 8 characters');
   if (findUserByEmail(email)) return bad(res, 409, 'That email is already registered');
   if (findUserByUsername(username)) return bad(res, 409, 'That username is already taken');
 
   const user = {
-    id: uid(),
-    email: email.toLowerCase(),
-    username,
+    id: uid(), email: email.toLowerCase(), username,
     displayName: (displayName || '').trim().slice(0, 32) || username,
     passwordHash: await bcrypt.hash(password, 10),
-    bio: '', avatar: null,
-    friends: [], incoming: [], outgoing: [],
+    bio: '', avatar: null, friends: [], incoming: [], outgoing: [],
     createdAt: now()
   };
   db.users[user.id] = user;
+  ensureOfficialMembership(user); // every new user joins Slate Official
   save();
   res.json({ token: issueToken(user), user: selfUser(user) });
 });
@@ -369,16 +401,25 @@ app.post('/api/auth/login', async (req, res) => {
   if (!user || !(await bcrypt.compare(password, user.passwordHash))) {
     return bad(res, 401, 'Wrong credentials — check your email/username and password');
   }
+  ensureOfficialMembership(user); // existing accounts get added on login too
+  save();
   res.json({ token: issueToken(user), user: selfUser(user) });
 });
 
 app.get('/api/auth/me', auth, (req, res) => res.json({ user: selfUser(req.user) }));
 
-/* ---------- profile ---------- */
+/* ---- profile (display name, username, bio, avatar) ---- */
 app.patch('/api/me', auth, (req, res) => {
   const u = req.user;
-  const { displayName, bio, avatar } = req.body || {};
+  const { displayName, username, bio, avatar } = req.body || {};
 
+  if (username !== undefined) {
+    const un = String(username).trim();
+    if (!USERNAME_RE.test(un)) return bad(res, 400, 'Username must be 3–20 characters (letters, numbers, underscore)');
+    const existing = findUserByUsername(un);
+    if (existing && existing.id !== u.id) return bad(res, 409, 'That username is already taken');
+    u.username = un;
+  }
   if (displayName !== undefined) {
     const name = String(displayName).trim().slice(0, 32);
     if (!name) return bad(res, 400, 'Display name cannot be empty');
@@ -387,20 +428,42 @@ app.patch('/api/me', auth, (req, res) => {
   if (bio !== undefined) u.bio = String(bio).trim().slice(0, 280);
   if (avatar !== undefined) {
     if (avatar === null) u.avatar = null;
-    else if (typeof avatar === 'string' && avatar.startsWith('data:image/') && avatar.length < 400000) {
-      u.avatar = avatar;
-    } else return bad(res, 400, 'Avatar must be an image under ~300KB');
+    else if (typeof avatar === 'string' && avatar.startsWith('data:image/') && avatar.length < 400000) u.avatar = avatar;
+    else return bad(res, 400, 'Avatar must be an image under ~300KB');
   }
   save();
 
   const pub = publicUser(u);
   for (const fid of u.friends) io.to('user:' + fid).emit('user:update', { user: pub });
-  io.to('user:' + u.id).emit('user:update', { user: pub }); // own tabs stay in sync
-
+  io.to('user:' + u.id).emit('user:update', { user: pub });
   res.json({ user: selfUser(u) });
 });
 
-/* ---------- user search ---------- */
+/* ---- features + GIF search (Tenor proxy) ---- */
+app.get('/api/features', auth, (req, res) => res.json({ gifs: !!process.env.TENOR_API_KEY }));
+
+app.get('/api/gifs/search', auth, async (req, res) => {
+  if (!process.env.TENOR_API_KEY) return res.json({ configured: false, gifs: [] });
+  const q = String(req.query.q || '').trim();
+  const url = new URL('https://tenor.googleapis.com/v2/' + (q ? 'search' : 'trending'));
+  url.searchParams.set('key', process.env.TENOR_API_KEY);
+  url.searchParams.set('client_key', 'slate');
+  url.searchParams.set('limit', '24');
+  if (q) url.searchParams.set('q', q);
+  try {
+    const r = await fetch(url);
+    const d = await r.json();
+    const gifs = (d.results || []).map(g => ({
+      id: g.id,
+      url: ((g.media_formats || {}).mediumgif || (g.media_formats || {}).gif || {}).url || '',
+      preview: ((g.media_formats || {}).tinygif || {}).url || '',
+      desc: g.content_description || ''
+    })).filter(g => g.url);
+    res.json({ configured: true, gifs });
+  } catch { res.json({ configured: true, gifs: [] }); }
+});
+
+/* ---- user search ---- */
 app.get('/api/users/search', auth, (req, res) => {
   const q = String(req.query.q || '').trim().toLowerCase();
   if (q.length < 2) return res.json({ results: [] });
@@ -413,7 +476,7 @@ app.get('/api/users/search', auth, (req, res) => {
   res.json({ results });
 });
 
-/* ---------- friends ---------- */
+/* ---- friends ---- */
 app.get('/api/friends', auth, (req, res) => {
   const me = req.user;
   res.json({
@@ -429,9 +492,7 @@ app.post('/api/friends/request', auth, (req, res) => {
   if (!target || target.id === me.id) return bad(res, 400, 'Pick someone else to add');
   if (me.friends.includes(target.id)) return bad(res, 409, 'You are already friends');
   if (me.outgoing.includes(target.id)) return bad(res, 409, 'Request already sent');
-  if (me.incoming.includes(target.id)) {
-    return bad(res, 409, `${target.username} already sent you a request — accept it in the Friends panel`);
-  }
+  if (me.incoming.includes(target.id)) return bad(res, 409, `${target.username} already sent you a request — accept it on the Friends page`);
   me.outgoing.push(target.id);
   target.incoming.push(me.id);
   save();
@@ -465,6 +526,17 @@ app.post('/api/friends/decline', auth, (req, res) => {
   res.json({ ok: true });
 });
 
+app.post('/api/friends/cancel', auth, (req, res) => {
+  const other = getUser(req.body && req.body.userId);
+  const me = req.user;
+  if (!other || !me.outgoing.includes(other.id)) return bad(res, 400, 'No outgoing request to that user');
+  me.outgoing = me.outgoing.filter(id => id !== other.id);
+  other.incoming = other.incoming.filter(id => id !== me.id);
+  save();
+  io.to('user:' + other.id).emit('friends:sync');
+  res.json({ ok: true });
+});
+
 app.post('/api/friends/remove', auth, (req, res) => {
   const other = getUser(req.body && req.body.userId);
   const me = req.user;
@@ -476,7 +548,7 @@ app.post('/api/friends/remove', auth, (req, res) => {
   res.json({ ok: true });
 });
 
-/* ---------- servers & channels ---------- */
+/* ---- servers & channels ---- */
 app.get('/api/servers', auth, (req, res) => {
   const mine = Object.values(db.servers).filter(s => s.memberIds.includes(req.user.id));
   res.json({ servers: mine.map(serializeServer) });
@@ -487,13 +559,33 @@ app.post('/api/servers', auth, (req, res) => {
   if (name.length < 2) return bad(res, 400, 'Server name needs at least 2 characters');
   const me = req.user;
   const s = {
-    id: uid(), name, ownerId: me.id, memberIds: [me.id],
-    inviteCode: inviteCode(),
+    id: uid(), name, ownerId: me.id, official: false, icon: null,
+    memberIds: [me.id], inviteCode: inviteCode(),
     channels: [{ id: uid(), name: 'general', createdAt: now() }]
   };
   db.servers[s.id] = s;
   save();
-  syncRooms(me.id, 'server:' + s.id, true); // creator must receive live messages
+  syncRooms(me.id, 'server:' + s.id, true);
+  res.json({ server: serializeServer(s) });
+});
+
+app.patch('/api/servers/:id', auth, (req, res) => {
+  const s = db.servers[req.params.id];
+  if (!s) return bad(res, 404, 'Server not found');
+  if (s.ownerId !== req.user.id) return bad(res, 403, 'Only the server owner can change these settings');
+  const { name, icon } = req.body || {};
+  if (name !== undefined) {
+    const n = String(name).trim().slice(0, 40);
+    if (n.length < 2) return bad(res, 400, 'Server name needs at least 2 characters');
+    s.name = n;
+  }
+  if (icon !== undefined) {
+    if (icon === null) s.icon = null;
+    else if (typeof icon === 'string' && icon.startsWith('data:image/') && icon.length < 400000) s.icon = icon;
+    else return bad(res, 400, 'Server icon must be an image under ~300KB');
+  }
+  save();
+  io.to('server:' + s.id).emit('server:sync', { serverId: s.id });
   res.json({ server: serializeServer(s) });
 });
 
@@ -515,11 +607,8 @@ app.post('/api/servers/:id/channels', auth, (req, res) => {
   const s = db.servers[req.params.id];
   if (!s) return bad(res, 404, 'Server not found');
   if (!s.memberIds.includes(req.user.id)) return bad(res, 403, 'Join the server first');
-  const name = String((req.body && req.body.name) || '')
-    .trim().toLowerCase().replace(/\s+/g, '-').slice(0, 24);
-  if (!/^[a-z0-9_-]{1,24}$/.test(name)) {
-    return bad(res, 400, 'Channel name: 1–24 chars — letters, numbers, - and _');
-  }
+  const name = String((req.body && req.body.name) || '').trim().toLowerCase().replace(/\s+/g, '-').slice(0, 24);
+  if (!/^[a-z0-9_-]{1,24}$/.test(name)) return bad(res, 400, 'Channel name: 1–24 chars — letters, numbers, - and _');
   if (s.channels.some(c => c.name === name)) return bad(res, 409, 'A channel with that name already exists');
   const channel = { id: uid(), name, createdAt: now() };
   s.channels.push(channel);
@@ -535,9 +624,9 @@ app.delete('/api/servers/:id/leave', auth, (req, res) => {
   if (!s.memberIds.includes(me.id)) return bad(res, 400, 'You are not in that server');
   s.memberIds = s.memberIds.filter(id => id !== me.id);
   if (s.memberIds.length === 0) {
-    delete db.servers[s.id];
+    if (!s.official) delete db.servers[s.id]; // the official server is never deleted
   } else {
-    if (s.ownerId === me.id) s.ownerId = s.memberIds[0]; // transfer ownership
+    if (s.ownerId === me.id) s.ownerId = s.memberIds[0];
     io.to('server:' + s.id).emit('server:sync', { serverId: s.id });
   }
   syncRooms(me.id, 'server:' + s.id, false);
@@ -545,7 +634,7 @@ app.delete('/api/servers/:id/leave', auth, (req, res) => {
   res.json({ ok: true });
 });
 
-/* ---------- message history ---------- */
+/* ---- message history ---- */
 app.get('/api/messages/channel/:channelId', auth, (req, res) => {
   const server = findServerByChannel(req.params.channelId);
   if (!server) return bad(res, 404, 'Channel not found');
@@ -560,16 +649,11 @@ app.get('/api/messages/dm/:userId', auth, (req, res) => {
   res.json(history(req, 'dm', dmRoomKey(req.user.id, other.id)));
 });
 
-/* =====================================================================
-   7 · HEALTH, 404, ERROR HANDLER, LISTEN
-===================================================================== */
-// Render's default health check hits "/"
+/* ---------- 7 · health / errors / listen ---------- */
 app.get('/', (req, res) => res.json({ ok: true, name: 'slate-server', uptime: Math.floor(process.uptime()) }));
 app.get('/api/health', (req, res) => res.json({
-  ok: true,
-  uptime: Math.floor(process.uptime()),
-  users: Object.keys(db.users).length,
-  messages: db.messages.length
+  ok: true, uptime: Math.floor(process.uptime()),
+  users: Object.keys(db.users).length, messages: db.messages.length
 }));
 
 app.use((req, res) => res.status(404).json({ error: 'Not found' }));
@@ -577,9 +661,7 @@ app.use((err, req, res, next) => { // eslint-disable-line no-unused-vars
   if (err && (err.type === 'entity.parse.failed' || err.type === 'entity.too.large')) {
     return res.status(400).json({ error: 'Invalid or too-large JSON body' });
   }
-  if (err && err.message === 'Blocked by CORS') {
-    return res.status(403).json({ error: 'Origin not allowed' });
-  }
+  if (err && err.message === 'Blocked by CORS') return res.status(403).json({ error: 'Origin not allowed' });
   console.error(err);
   res.status(500).json({ error: 'Something went wrong' });
 });
