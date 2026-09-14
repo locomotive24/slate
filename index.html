@@ -13,7 +13,6 @@
 </head>
 <body>
 
-<!-- hand-drawn icon sprite -->
 <svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
   <symbol id="i-hash" viewBox="0 0 24 24"><path d="M9 4 7 20M17 4l-2 16M4.5 9h15M4 15h15"/></symbol>
   <symbol id="i-send" viewBox="0 0 24 24"><path d="M21 3 3.5 10.5l6.5 3 3 6.5L21 3Z"/><path d="M21 3 10 13.5"/></symbol>
@@ -33,6 +32,8 @@
   <symbol id="i-menu" viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></symbol>
   <symbol id="i-image" viewBox="0 0 24 24"><rect x="4" y="5" width="16" height="14" rx="2"/><circle cx="9" cy="10" r="1.5"/><path d="m5 17.5 4.5-4.5 3.5 3.5 2.5-2.5 4 4"/></symbol>
   <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
+  <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11l8-7 8 7"/><path d="M6 10v9a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-9"/></symbol>
+  <symbol id="i-reply" viewBox="0 0 24 24"><path d="M9 15 4 10l5-5"/><path d="M4 10h9a7 7 0 0 1 7 7v2"/></symbol>
 </svg>
 
 <!-- ============ AUTH ============ -->
@@ -95,7 +96,7 @@
 <!-- ============ APP ============ -->
 <main id="appView" class="app" hidden>
   <nav class="rail">
-    <button class="rail-avatar" id="railAvatar" title="You — open settings"></button>
+    <button class="rail-btn rail-home" id="railHome" title="Home"></button>
     <div class="rail-sep"></div>
     <div class="rail-scroll" id="railServers"></div>
     <button class="rail-add" id="railAdd" title="Create or join a server"></button>
@@ -103,6 +104,7 @@
     <button class="rail-btn" id="railFriends" title="Friends"></button>
     <button class="rail-btn" id="railSettings" title="Settings"></button>
     <button class="rail-btn" id="railTheme" title="Toggle theme"></button>
+    <button class="rail-avatar" id="railAvatar" title="You — open settings"></button>
   </nav>
 
   <aside class="sidebar" id="sidebar">
@@ -110,14 +112,19 @@
   </aside>
   <div class="scrim" id="scrimSidebar"></div>
 
-  <section class="chat">
+  <section class="chat" id="chatSection">
     <header class="chat-head">
       <button class="icon-btn mobile-only" id="menuBtn" title="Menu"></button>
       <h2 class="chat-title" id="chatTitle"></h2>
+      <nav class="home-tabs" id="homeTabs"></nav>
       <span class="chat-meta mono" id="chatMeta"></span>
       <span class="head-gap"></span>
       <button class="icon-btn" id="membersToggle" title="Toggle members"></button>
     </header>
+
+    <section class="home-view" id="homeView">
+      <div class="home-body" id="homeBody"></div>
+    </section>
 
     <div class="chat-main">
       <div class="chat-scroll" id="chatScroll">
@@ -137,8 +144,24 @@
 
     <footer class="composer">
       <div class="composer-box" id="composerBox">
-        <textarea id="composerInput" rows="1" placeholder="Message…" maxlength="2000"></textarea>
-        <button class="btn btn-accent btn-send" id="sendBtn" title="Send"></button>
+        <div class="reply-bar" id="replyBar" hidden>
+          <span id="replyIconSlot"></span>
+          <div class="reply-info" id="replyInfo"></div>
+          <button class="icon-btn" id="replyCancel" title="Cancel reply"></button>
+        </div>
+        <div class="pending-image" id="pendingImageRow" hidden>
+          <img id="pendingImageThumb" alt="Attached image">
+          <span class="pending-label mono">IMAGE READY — SENDS WITH YOUR NEXT MESSAGE</span>
+          <button class="icon-btn" id="pendingImageRemove" title="Remove image"></button>
+        </div>
+        <div class="composer-row">
+          <button class="icon-btn composer-extra" id="attachBtn" title="Attach an image"></button>
+          <button class="gif-btn mono" id="gifBtn" type="button" hidden>GIF</button>
+          <textarea id="composerInput" rows="1" placeholder="Message…" maxlength="2000"></textarea>
+          <button class="btn btn-accent btn-send" id="sendBtn" title="Send"></button>
+        </div>
+        <input type="file" id="imageFile" accept="image/*" hidden>
+        <div class="mention-pop" id="mentionPop" hidden></div>
       </div>
     </footer>
 
@@ -152,7 +175,7 @@
   <div class="scrim" id="scrimMembers"></div>
 </main>
 
-<!-- ============ SETTINGS SLIDE-OVER ============ -->
+<!-- ============ SETTINGS ============ -->
 <aside class="settings" id="settingsPanel">
   <header class="settings-head">
     <h3>Settings</h3>
@@ -171,6 +194,10 @@
           <button class="btn btn-ghost btn-sm" id="avatarRemove">Remove</button>
         </div>
       </div>
+      <label class="field"><span class="field-label mono">USERNAME</span>
+        <input id="usernameInput" maxlength="20" spellcheck="false">
+        <span class="field-hint mono">3–20 chars · letters, numbers, underscore</span>
+      </label>
       <label class="field"><span class="field-label mono">DISPLAY NAME</span>
         <input id="displayNameInput" maxlength="32">
       </label>
