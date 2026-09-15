@@ -283,7 +283,7 @@ function setAccent(hex) {
   document.documentElement.style.setProperty('--accent', hex);
   document.documentElement.style.setProperty('--on-accent', pickOnAccent(hex));
   localStorage.setItem(LS.accent, hex);
-  buildSwatches();
+  markActiveSwatch(hex);
 }
 function setTheme(mode, persist = true) {
   briefThemeAnim();
@@ -298,18 +298,37 @@ function buildSwatches() {
   const wrap = $('#swatches');
   wrap.replaceChildren();
   for (const a of ACCENTS) {
-    const b = el('button', 'swatch' + (a.hex.toLowerCase() === cur.toLowerCase() ? ' is-active' : ''));
-    b.type = 'button'; b.title = a.name; b.style.background = a.hex;
+    const b = el('button', 'swatch');
+    b.type = 'button';
+    b.title = a.name;
+    b.style.background = a.hex;
+    b.dataset.hex = a.hex;
     b.addEventListener('click', () => setAccent(a.hex));
     wrap.append(b);
   }
   const custom = el('label', 'swatch swatch-custom');
   custom.title = 'Custom color';
   custom.append(icon('plus'));
-  const inp = el('input'); inp.type = 'color'; inp.value = cur;
+  const inp = el('input');
+  inp.type = 'color';
+  inp.value = cur;
   inp.addEventListener('input', () => setAccent(inp.value));
   custom.append(inp);
   wrap.append(custom);
+  markActiveSwatch(cur);
+}
+
+function markActiveSwatch(hex) {
+  const h = String(hex || '').toLowerCase();
+  let matched = false;
+  $$('#swatches .swatch').forEach(b => {
+    if (b.classList.contains('swatch-custom')) return;
+    const on = String(b.dataset.hex || '').toLowerCase() === h;
+    b.classList.toggle('is-active', on);
+    if (on) matched = true;
+  });
+  const custom = $('#swatches .swatch-custom');
+  if (custom) custom.classList.toggle('is-active', !!h && !matched);
 }
 
 /* =====================================================================
