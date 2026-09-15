@@ -156,13 +156,23 @@ a { color: var(--accent); }
 .rail-btn { display: inline-flex; align-items: center; justify-content: center; }
 .rail-btn.is-active { color: var(--accent); }
 .rail-gap { flex: 1; }
+
+/* badge system: grey number = unread, accent number = ping, dot = plain unread on rail */
 .rail-badge, .badge {
-  background: var(--accent); color: var(--on-accent, #fff);
   font-family: var(--mono); font-size: 10px; min-width: 18px; height: 18px;
   border-radius: 99px; display: inline-flex; align-items: center; justify-content: center;
   padding: 0 5px; flex: none;
 }
-.rail-badge { position: absolute; top: -3px; right: -4px; box-shadow: 0 0 0 2px var(--bg); }
+.rail-badge {
+  position: absolute; top: -3px; right: -4px; box-shadow: 0 0 0 2px var(--bg);
+  background: var(--accent); color: var(--on-accent, #fff);
+}
+.rail-dot {
+  position: absolute; top: -3px; right: -3px; width: 9px; height: 9px;
+  border-radius: 50%; background: var(--text); box-shadow: 0 0 0 2px var(--bg);
+}
+.badge { background: var(--muted); color: var(--bg); }
+.badge-mention { background: var(--accent); color: var(--on-accent, #fff); }
 
 /* -- sidebar -- */
 .sidebar { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
@@ -265,7 +275,8 @@ a { color: var(--accent); }
 .msg { display: flex; gap: 12px; padding: 6px 12px; margin: 2px -12px; border-radius: 10px; position: relative; }
 .msg:hover { background: var(--hover); }
 .msg.compact { padding-top: 1px; padding-bottom: 1px; }
-.msg-spacer { width: 46px; flex: none; }
+/* FIX: 34px + 12px flex gap = 46px, exactly where the avatar row's text starts */
+.msg-spacer { width: 34px; flex: none; }
 .msg-body { flex: 1; min-width: 0; }
 .msg-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 1px; }
 .msg-name { font-weight: 600; font-size: 14px; }
@@ -284,6 +295,12 @@ a { color: var(--accent); }
   display: block; max-width: min(420px, 100%); max-height: 320px;
   border-radius: 12px; margin-top: 6px; cursor: zoom-in;
   border: 1px solid var(--line); object-fit: cover;
+}
+.img-broken {
+  display: flex; align-items: center; justify-content: center;
+  width: 200px; height: 90px; margin-top: 6px;
+  border: 1px dashed var(--line); border-radius: 10px;
+  color: var(--faint); font-size: 9px; letter-spacing: .12em;
 }
 .mention { background: var(--accent-soft); color: var(--accent); border-radius: 6px; padding: 0 4px; font-weight: 600; }
 .mention-me { background: var(--accent); color: var(--on-accent, #fff); }
@@ -310,7 +327,7 @@ a { color: var(--accent); }
 
 .chat-empty {
   position: absolute; inset: 0; display: grid; place-content: center; text-align: center;
-  gap: 12px; padding: 24px; background: var(--surface); /* FIX: opaque */
+  gap: 12px; padding: 24px; background: var(--surface);
 }
 .empty-mark { font-size: clamp(40px, 6vw, 64px); font-weight: 700; letter-spacing: -.03em; }
 .empty-hint { color: var(--faint); font-size: 10.5px; letter-spacing: .14em; max-width: 52ch; }
@@ -322,7 +339,7 @@ a { color: var(--accent); }
 .tdots i:nth-child(2) { animation-delay: .18s; }
 .tdots i:nth-child(3) { animation-delay: .36s; }
 
-/* -- composer (now a column: reply bar / image chip / input row) -- */
+/* -- composer -- */
 .composer { flex: none; padding: 6px 16px 16px; }
 .composer-box {
   display: flex; flex-direction: column; gap: 8px;
