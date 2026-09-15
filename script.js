@@ -263,7 +263,56 @@ function renderText(text) {
   if (idx < text.length) frag.append(...linkify(text.slice(idx)));
   return frag;
 }
+/* ---------- notification ping + favicon badge ---------- */
+let audioCtx = null, lastPingAt = 0;
+function playPing() {
+  try {
+    const t = Date.now();
+    if (t - lastPingAt < 700) return; // no machine-gun dings
+    lastPingAt = t;
+    if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    const at = audioCtx.currentTime;
+    const master = audioCtx.createGain();
+    master.gain.value = 0.14;
+    master.connect(audioCtx.destination);
+    [[880, 0], [1318.5, 0.09]].forEach(([freq, off]) => {
+      const osc = audioCtx.createOscillator();
+      const g = audioCtx.createGain();
+      osc.type = 'sine';
+      osc.frequency.value = freq;
+      g.gain.setValueAtTime(0.0001, at + off);
+      g.gain.exponentialRampToValueAtTime(1, at + off + 0.012);
+      g.gain.exponentialRampToValueAtTime(0.0001, at + off + 0.32);
+      osc.connect(g);
+      g.connect(master);
+      osc.start(at + off);
+      osc.stop(at + off + 0.36);
+    });
+  } catch { /* audio not available — ignore */ }
+}
 
+function updateFaviconBadge(total) {
+  const link = document.querySelector('link[rel="icon"]');
+  if (!link) return;
+  if (!total) { link.href = 'favicon.svg'; return; }
+  const cv = document.createElement('canvas');
+  cv.width = cv.height = 64;
+  const ctx = cv.getContext('2d');
+  const css = getComputedStyle(document.documentElement);
+  ctx.fillStyle = '#141417';
+  ctx.fillRect(0, 0, 64, 64);
+  ctx.fillStyle = css.getPropertyValue('--accent').trim() || '#ff5c38';
+  ctx.beginPath();
+  ctx.arc(32, 27, 23, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.fillStyle = css.getPropertyValue('--on-accent').trim() || '#ffffff';
+  ctx.font = 'bold 26px monospace';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(total > 9 ? '9+' : String(total), 32, 28);
+  link.href = cv.toDataURL('image/png');
+}
 /* =====================================================================
    THEME & ACCENT
 ===================================================================== */
@@ -347,6 +396,7 @@ function syncOnlineFrom(list) {
 function updateTitle() {
   const total = Object.values(state.unread).reduce((a, b) => a + b, 0);
   document.title = (total ? `(${total}) ` : '') + 'slate · realtime chat';
+  updateFaviconBadge(total);
 }
 function renderAll() {
   renderRail(); renderSidebar(); renderChatChrome(); renderMembers();
@@ -598,7 +648,11 @@ function onMention(d) {
     if (r.type === 'channel' && d.info.type === 'channel') current = d.info.channelId === r.channelId;
     if (r.type === 'dm' && d.info.type === 'dm') current = d.info.userIds && d.info.userIds.includes(r.userId);
   }
-  if (!current) toast(`${d.from.displayName} mentioned you in ${d.place}`);
+  if (!current || document.hidden) {
+    const where = (d.place && d.place.channelName) ? '#' + d.place.channelName : 'a direct message';
+    toast(`${d.from.displayName} mentioned you in ${where}`);
+    playPing();
+  }
 }
 function onTyping(t) {
   const r = state.route;
@@ -646,6 +700,7 @@ function isCurrentMessage(m) {
 function onNewMessage(m) {
   if (m.author) state.authors[m.authorId] = m.author;
   const key = messageKeyFor(m);
+
   if (isCurrentMessage(m)) {
     const pinned = isPinned();
     state.messages.push(m);
@@ -659,6 +714,7 @@ function onNewMessage(m) {
   state.unread[key] = (state.unread[key] || 0) + 1;
   renderRail(); renderSidebar();
   updateTitle();
+  if (m.info && m.info.type === 'dm') playPing();
 }
 function onMessageDeleted(d) {
   const r = state.route;
