@@ -193,6 +193,18 @@ const presence = {
   isOnline(userId) { return socketsByUser.has(userId); }
 };
 
+/* presence goes only to people who actually know this user
+   (friends + shared-server members) — not broadcast to the whole platform */
+function emitPresence(userId, online) {
+  const ev = { userId, online };
+  const targets = new Set();
+  const u = getUser(userId);
+  if (u) for (const fid of u.friends) targets.add(fid);
+  for (const s of Object.values(db.servers)) {
+    if (s.memberIds.includes(userId)) for (const mid of s.memberIds) targets.add(mid);
+  }
+  for (const tid of targets) io.to('user:' + tid).emit('presence:update', ev);
+}
 /* ---------- 4 · express + cors ---------- */
 const app = express();
 const httpServer = http.createServer(app);
@@ -238,7 +250,7 @@ io.on('connection', (socket) => {
   for (const s of Object.values(db.servers)) {
     if (s.memberIds.includes(socket.userId)) socket.join('server:' + s.id);
   }
-  if (presence.add(socket)) io.emit('presence:update', { userId: socket.userId, online: true });
+  if (presence.add(socket)) emitPresence(socket.userId, true);
 
   socket.on('message:send', async (payload, ack) => {
     const user = me(); if (!user) return;
@@ -342,7 +354,7 @@ io.on('connection', (socket) => {
   });
 
   socket.on('disconnect', () => {
-    if (presence.remove(socket)) io.emit('presence:update', { userId: socket.userId, online: false });
+    if (presence.remove(socket)) emitPresence(socket.userId, false);
   });
 });
 
