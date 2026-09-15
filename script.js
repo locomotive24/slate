@@ -1,6 +1,6 @@
 'use strict';
 /* =====================================================================
-   slate — script.js (all frontend JS)
+   slate — script.js (all frontend JS) — COMPLETE FILE
    ★ THE ONLY LINE YOU EDIT FOR PRODUCTION IS RIGHT BELOW ★
 ===================================================================== */
 const QUERY_API  = new URLSearchParams(location.search).get('api');
@@ -52,7 +52,9 @@ const state = {
   pendingImage: null,
   gifsEnabled: false,
   mentionUsers: [],
-  mentionIndex: 0
+  mentionIndex: 0,
+  hasMore: false,        // FIX: real pagination flag (old code used === 50)
+  loadingOlder: false
 };
 
 /* ---------- element refs ---------- */
@@ -305,7 +307,6 @@ function updateFaviconBadge(total) {
   const css = getComputedStyle(document.documentElement);
   const accent = css.getPropertyValue('--accent').trim() || '#ff5c38';
   const onAccent = css.getPropertyValue('--on-accent').trim() || '#ffffff';
-  // only re-encode the PNG when the number or color actually changed
   const key = total + '|' + accent;
   if (key === lastBadgeKey) return;
   lastBadgeKey = key;
@@ -401,7 +402,7 @@ const getPeer = (id) => state.friends.friends.find(f => f.id === id) || state.au
 const authorName = (id) => (state.authors[id] && state.authors[id].displayName) || 'unknown';
 const isPinned = () => chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 140;
 function serverInitials(name) {
-  return String(name).trim().split(/\s+/).slice(0, 2).map(w => w[0] || '').join('').toUpperCase() || 'S';
+  return String(name || '').trim().split(/\s+/).slice(0, 2).map(w => w[0] || '').join('').toUpperCase() || 'S';
 }
 function syncOnlineFrom(list) {
   for (const u of list) { if (u.online) state.online.add(u.id); else state.online.delete(u.id); }
@@ -415,10 +416,7 @@ function renderAll() {
   renderRail(); renderSidebar(); renderChatChrome(); renderMembers();
 }
 
-/* ---------- THE FIX: coalesce event-driven re-renders ----------
-   Presence/user/sync events used to trigger full re-renders one by
-   one — dozens per second during a storm, each recreating avatar
-   images. Now they're merged into at most one render per 300ms.  */
+/* ---------- coalesce event-driven re-renders (max one per 300ms) ---------- */
 let renderTimer = null;
 function requestRender() {
   if (renderTimer) return;
@@ -428,17 +426,27 @@ function requestRender() {
   }, 300);
 }
 
-/* ---------- THE FIX: cap in-memory messages in long rooms ---------- */
+/* =====================================================================
+   THE SCROLLING FIX — "stick to bottom" window
+   While stickBottomUntil is in the future, the view re-pins itself to
+   the newest message — including when images finish decoding LATE,
+   which used to leave you stranded mid-history. Scrolling away on
+   purpose cancels it (see the scroll listener near the bottom).
+   Pair this with `overflow-anchor: none` in styles.css.
+===================================================================== */
+let stickBottomUntil = 0;
+
 function trimMessagesIfNeeded() {
   if (state.messages.length <= MSG_CAP || !isPinned()) return;
   state.messages = state.messages.slice(-300);
+  state.hasMore = true; // we just dropped loaded history — older pages exist
   messagesEl.classList.add('no-anim');
   renderHistory({ instant: true });
   requestAnimationFrame(() => messagesEl.classList.remove('no-anim'));
   chatScroll.scrollTop = chatScroll.scrollHeight;
 }
 
-/* ---------- THE FIX: throttle background data refreshes ---------- */
+/* ---------- throttle background data refreshes ---------- */
 let lastFriendsFetch = 0, lastServersFetch = 0, lastResyncAt = 0;
 function loadFriendsThrottled() {
   if (Date.now() - lastFriendsFetch < 2000) return;
@@ -511,7 +519,7 @@ async function withAuthBusy(btn, errEl, fn) {
   finally { btn.disabled = false; }
 }
 
-/* ---------- latency seismograph (login screen only — it STOPS after login) ---------- */
+/* ---------- latency seismograph (login screen only — STOPS after login) ---------- */
 const pingHistory = [];
 function startPingMeter() {
   const canvas = $('#pingCanvas');
@@ -585,6 +593,7 @@ function enterApp(user, token) {
   if (localStorage.getItem(LS.members) !== 'off') appView.classList.add('members-on');
   connectSocket(token);
   renderAll();
+  updateTitle();
   api('GET', '/api/features').then(d => {
     state.gifsEnabled = !!d.gifs;
     gifBtn.hidden = !state.gifsEnabled;
@@ -641,9 +650,13 @@ async function resync() {
       const path = r.type === 'channel' ? `/api/messages/channel/${r.channelId}` : `/api/messages/dm/${r.userId}`;
       const d = await api('GET', path);
       if (state.route === r) {
+        // FIX: a reconnect no longer yanks you to the bottom if you
+        // were reading history — scroll position is preserved instead
+        const keepScroll = !isPinned();
         state.messages = d.messages;
+        state.hasMore = d.messages.length === HISTORY_PAGE;
         Object.assign(state.authors, d.users);
-        renderHistory();
+        renderHistory({ instant: true, preserveScroll: keepScroll });
       }
     } catch { /* route may be gone */ }
   }
@@ -695,9 +708,7 @@ function onPresence({ userId, online }) {
   requestRender();
 }
 
-/* THE FIX: mention toasts/sounds only when you're NOT already looking
-   at that conversation. No more "document.hidden" pings while you're
-   sitting in the room with another window focused.                    */
+/* mention toasts only when you're NOT already looking at that conversation */
 function onMention(d) {
   if (!d || !d.from) return;
   const r = state.route;
@@ -706,14 +717,13 @@ function onMention(d) {
     if (r.type === 'channel' && d.info.type === 'channel') current = d.info.channelId === r.channelId;
     if (r.type === 'dm' && d.info.type === 'dm') current = d.info.userIds && d.info.userIds.includes(r.userId);
   }
-  if (current) return; // you're watching that conversation — stay quiet
+  if (current) return;
   const where = (d.place && d.place.channelName) ? '#' + d.place.channelName : 'a direct message';
   toast(`${d.from.displayName} mentioned you in ${where}`);
-  // the sound itself is handled by onNewMessage
 }
 function onTyping(t) {
   const r = state.route;
-  if (!r) return;
+  if (!r || !state.me) return;
   const isCurrent = r.type === 'channel'
     ? (t.roomType === 'channel' && t.room === r.channelId)
     : (t.roomType === 'dm' && t.room === dmRoomKey(state.me.id, r.userId));
@@ -748,27 +758,32 @@ function messageKeyFor(m) {
   const peer = m.info.userIds.find(id => id !== state.me.id);
   return peer ? 'dm:' + peer : null;
 }
+/* FIX: room-based check — works for live AND history messages */
 function isCurrentMessage(m) {
   const r = state.route;
-  if (!r) return false;
+  if (!r || !m) return false;
   if (r.type === 'channel') return m.type === 'channel' && m.room === r.channelId;
-  return m.type === 'dm' && m.info && m.info.userIds && m.info.userIds.includes(r.userId);
+  return m.type === 'dm' && m.room === dmRoomKey(state.me.id, r.userId);
 }
 
-/* THE FIX: one strict sound rule —
-   a ding ONLY when (a) it's a DM, or (b) you were @mentioned,
-   AND you're not currently viewing that conversation (early return above). */
+/* a ding ONLY when (a) it's a DM, or (b) you were @mentioned,
+   AND you're not currently viewing that conversation */
 function onNewMessage(m) {
   if (m.author) state.authors[m.authorId] = m.author;
   const key = messageKeyFor(m);
 
   if (isCurrentMessage(m)) {
-    const pinned = isPinned();
+    /* THE SCROLLING FIX: stay glued to the bottom even if an image
+       higher up is still decoding */
+    const pinned = isPinned() || Date.now() < stickBottomUntil;
     state.messages.push(m);
     state.typers.delete(m.authorId);
     renderMessageAppend(m);
     renderTyping();
-    if (pinned) chatScroll.scrollTop = chatScroll.scrollHeight;
+    if (pinned) {
+      stickBottomUntil = Date.now() + 1500;
+      chatScroll.scrollTop = chatScroll.scrollHeight;
+    }
     trimMessagesIfNeeded();
     return;
   }
@@ -786,9 +801,11 @@ function onNewMessage(m) {
 }
 function onMessageDeleted(d) {
   const r = state.route;
-  if (!r || !d) return;
+  if (!r || !d || !state.me) return;
+  /* FIX: the DM branch now checks WHICH room — deletes in another
+     conversation can never touch the one you're viewing */
   const current = (r.type === 'channel' && d.type === 'channel' && d.room === r.channelId) ||
-                  (r.type === 'dm' && d.type === 'dm');
+                  (r.type === 'dm' && d.type === 'dm' && d.room === dmRoomKey(state.me.id, r.userId));
   if (!current) return;
   const m = state.messages.find(x => x.id === d.id);
   if (!m) return;
@@ -866,6 +883,13 @@ function messageNode(m, opts = {}) {
       img.replaceWith(fb);
     });
     img.addEventListener('click', () => openLightbox(m.image));
+    /* THE SCROLLING FIX: an image that finishes decoding after we
+       scrolled used to silently un-pin us — re-glue while sticky */
+    img.addEventListener('load', () => {
+      if (Date.now() < stickBottomUntil && isCurrentMessage(m)) {
+        chatScroll.scrollTop = chatScroll.scrollHeight;
+      }
+    });
     body.append(img);
   }
 
@@ -928,7 +952,9 @@ function renderHistory(opts = {}) {
   messagesEl.replaceChildren();
   chatEmpty.hidden = list.length > 0;
   if (!list.length) return;
-  if (list.length === HISTORY_PAGE) {
+  /* FIX: hasMore flag — the old `=== HISTORY_PAGE` check made LOAD
+     OLDER vanish after exactly one page of history */
+  if (state.hasMore) {
     const b = el('button', 'older-btn mono', 'LOAD OLDER');
     b.addEventListener('click', loadOlderMessages);
     messagesEl.append(b);
@@ -945,7 +971,15 @@ function renderHistory(opts = {}) {
     }));
     prev = m;
   });
-  if (!opts.preserveScroll) chatScroll.scrollTop = chatScroll.scrollHeight;
+  if (!opts.preserveScroll) {
+    /* THE SCROLLING FIX: keep re-pinning briefly so late layout
+       (fonts, decoding images) can't leave you mid-history */
+    stickBottomUntil = Math.max(stickBottomUntil, Date.now() + 2000);
+    chatScroll.scrollTop = chatScroll.scrollHeight;
+    requestAnimationFrame(() => {
+      if (Date.now() < stickBottomUntil) chatScroll.scrollTop = chatScroll.scrollHeight;
+    });
+  }
 }
 function renderMessageAppend(m) {
   const prev = state.messages.length > 1 ? state.messages[state.messages.length - 2] : null;
@@ -955,22 +989,39 @@ function renderMessageAppend(m) {
 }
 async function loadOlderMessages() {
   const first = state.messages[0];
-  if (!first) return;
   const r = state.route;
-  if (!r) return;
+  if (!first || !r || state.loadingOlder) return;
+  state.loadingOlder = true;
   const base = r.type === 'channel' ? `/api/messages/channel/${r.channelId}` : `/api/messages/dm/${r.userId}`;
   try {
     const d = await api('GET', base + '?before=' + first.createdAt);
-    if (state.route !== r || !d.messages.length) return;
-    const prevHeight = chatScroll.scrollHeight;
-    const prevTop = chatScroll.scrollTop;
+    if (state.route !== r) return;
+    state.hasMore = d.messages.length === HISTORY_PAGE;
+    if (!d.messages.length) { renderHistory({ instant: true, preserveScroll: true }); return; }
     state.messages = [...d.messages, ...state.messages];
     Object.assign(state.authors, d.users);
     messagesEl.classList.add('no-anim');
     renderHistory({ instant: true, preserveScroll: true });
     requestAnimationFrame(() => messagesEl.classList.remove('no-anim'));
-    chatScroll.scrollTop = chatScroll.scrollHeight - prevHeight + prevTop;
+
+    /* THE SCROLLING FIX: anchor the view to the message that used to
+       be at the very top, and keep re-anchoring while prepended
+       images decode. (The old height-delta math fought the browser's
+       own scroll anchoring and double-shifted — overflow-anchor:none
+       in styles.css + this anchor does it right.) */
+    const anchor = () => {
+      const node = messagesEl.querySelector(`[data-id="${first.id}"]`);
+      if (!node) return;
+      const delta = node.getBoundingClientRect().top - chatScroll.getBoundingClientRect().top;
+      chatScroll.scrollTop += delta - 8;
+    };
+    anchor();
+    const until = Date.now() + 1500;
+    $$('img.msg-image', messagesEl).forEach(img => {
+      img.addEventListener('load', () => { if (Date.now() < until) anchor(); }, { once: true });
+    });
   } catch (e) { toast(e.message, 'error'); }
+  finally { state.loadingOlder = false; }
 }
 
 /* =====================================================================
@@ -998,7 +1049,10 @@ function goHome(tab) {
   if (tab) state.homeTab = tab;
   state.typers.clear(); renderTyping();
   state.messages = [];
+  state.hasMore = false;
   messagesEl.replaceChildren();
+  composerInput.value = '';
+  autosize();
   clearComposerExtras();
   closeDrawers();
   renderAll();
@@ -1007,10 +1061,16 @@ async function openRoom() {
   const current = state.route;
   state.typers.clear(); renderTyping();
   clearComposerExtras();
+  composerInput.value = '';
+  autosize();
+  /* FIX: never enter a room with the composer left disabled from a
+     previous failed load (e.g. a friend who removed you) */
+  composerBox.classList.remove('disabled');
   renderSidebar(); renderRail(); renderMembers(); renderChatChrome();
   closeDrawers();
   messagesEl.replaceChildren();
   state.messages = [];
+  state.hasMore = false;
   chatEmpty.hidden = false;
   emptyHint.textContent = 'LOADING…';
   try {
@@ -1020,8 +1080,10 @@ async function openRoom() {
     const d = await api('GET', path);
     if (state.route !== current) return;
     state.messages = d.messages;
+    state.hasMore = d.messages.length === HISTORY_PAGE;
     Object.assign(state.authors, d.users);
     if (!state.messages.length) emptyHint.textContent = 'THIS IS THE BEGINNING — SAY HELLO';
+    stickBottomUntil = Date.now() + 2500; // keep pinning while images decode
     renderHistory();
   } catch (e) {
     if (state.route !== current) return;
@@ -1152,9 +1214,13 @@ function renderServerSidebar(s) {
   inv.append(copyBtn);
   sidebarBody.append(inv);
 
-  const leave = el('button', 'link-danger mono', 'LEAVE SERVER');
-  leave.addEventListener('click', () => confirmLeaveServer(s));
-  sidebarBody.append(leave);
+  /* FIX: the official community server can't be left (and rejoins on
+     every login anyway) — don't offer a broken button */
+  if (!s.official) {
+    const leave = el('button', 'link-danger mono', 'LEAVE SERVER');
+    leave.addEventListener('click', () => confirmLeaveServer(s));
+    sidebarBody.append(leave);
+  }
 }
 
 /* =====================================================================
@@ -1183,7 +1249,7 @@ function renderHomeTabs() {
   }));
 }
 
-/* THE FIX: home rebuilds keep their scroll position */
+/* home rebuilds keep their scroll position */
 function renderHome() {
   const keepScroll = homeBody.scrollTop;
   buildHome();
@@ -1271,11 +1337,11 @@ function confirmRemoveFriend(u) {
   });
 }
 
-/* ---------- Add Friend tab — search box survives re-renders now ---------- */
+/* ---------- Add Friend tab — search box survives re-renders ---------- */
 let addFriendDeb = null, addFriendSeq = 0;
 function renderAddFriend() {
-  // THE FIX: if a background update rebuilds this view while you're
-  // typing, your focus and caret position are preserved
+  // if a background update rebuilds this view while you're typing,
+  // your focus and caret position are preserved
   const prev = $('.add-friend-input');
   const wasFocused = !!prev && document.activeElement === prev;
   const caret = prev ? prev.selectionStart : 0;
@@ -1286,6 +1352,7 @@ function renderAddFriend() {
   const inp = el('input', 'add-friend-input');
   inp.placeholder = 'Type a username or display name…';
   inp.spellcheck = false;
+  inp.autocomplete = 'off';
   inp.value = state.addFriendQ;
   box.append(inp);
   const status = el('p', 'add-friend-status mono');
@@ -1357,8 +1424,10 @@ function updateAddFriendResults() {
         e.stopPropagation();
         try {
           await api('POST', '/api/friends/request', { userId: u.id });
+          u.state = 'outgoing'; // FIX: keep state in sync so a re-render can't resurrect the button
           toast('Request sent', 'success');
           row.querySelector('.icon-btn').replaceWith(el('span', 'state-tag mono', 'SENT'));
+          loadFriends();
         } catch (err) { toast(err.message, 'error'); }
       });
       row.append(add);
@@ -1371,6 +1440,7 @@ function updateAddFriendResults() {
    RENDER: CHAT CHROME
 ===================================================================== */
 function renderChatChrome() {
+  if (!state.me) return;
   const r = state.route;
   chatSection.classList.toggle('home-mode', !r);
   chatTitle.replaceChildren();
@@ -1412,6 +1482,7 @@ function renderChatChrome() {
    RENDER: MEMBERS / ACTIVE NOW
 ===================================================================== */
 function renderMembers() {
+  if (!state.me) return;
   const r = state.route;
   membersBody.replaceChildren();
   if (!r) {
@@ -1641,12 +1712,24 @@ function sendMessage(extra = {}) {
   const text = composerInput.value.trim();
   const image = extra.image || state.pendingImage || null;
   if (!text && !image) return;
+  const draft = { text, image, reply: state.replyTo };
+  stickBottomUntil = Date.now() + 5000; // your own send always lands at the bottom
   state.socket.emit('message:send', {
     roomType: r.type === 'channel' ? 'channel' : 'dm',
     target: r.type === 'channel' ? r.channelId : r.userId,
     text,
     image,
     replyTo: state.replyTo ? state.replyTo.id : null
+  }, (res) => {
+    /* FIX: if the server rejects it (rate-limit, lost access), put the
+       draft back instead of silently eating the message. Needs the
+       message:send handler from the server fix to fire on rejection. */
+    if (!res || res.ok) return;
+    toast('Message wasn’t sent — slow down a touch', 'error');
+    composerInput.value = draft.text;
+    autosize();
+    if (draft.image) { state.pendingImage = draft.image; renderPendingImage(); }
+    if (draft.reply) { state.replyTo = draft.reply; renderReplyBar(); }
   });
   composerInput.value = '';
   autosize();
@@ -1657,11 +1740,16 @@ function sendMessage(extra = {}) {
 }
 
 chatScroll.addEventListener('scroll', () => {
-  const far = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight > 300;
-  jumpBtn.classList.toggle('show', far);
+  const far = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight;
+  jumpBtn.classList.toggle('show', far > 300);
+  /* THE SCROLLING FIX: deliberately leaving the bottom cancels
+     stickiness — no more being yanked down while reading history */
+  if (far > 200) stickBottomUntil = 0;
 }, { passive: true });
-jumpBtn.addEventListener('click', () =>
-  chatScroll.scrollTo({ top: chatScroll.scrollHeight, behavior: 'smooth' }));
+jumpBtn.addEventListener('click', () => {
+  stickBottomUntil = Date.now() + 1500;
+  chatScroll.scrollTo({ top: chatScroll.scrollHeight, behavior: 'smooth' });
+});
 
 /* =====================================================================
    MODALS
@@ -1676,6 +1764,7 @@ function openAddServerModal() {
   const nameInp = el('input'); nameInp.maxLength = 40; nameInp.placeholder = 'e.g. Late Night Club';
   const codeInp = el('input', 'mono'); codeInp.placeholder = 'e.g. K7X4RM';
   codeInp.style.textTransform = 'uppercase';
+  codeInp.autocomplete = 'off';
   const err = el('p', 'form-error mono'); err.hidden = true;
   const body = el('div');
   body.append(fieldEl('SERVER NAME', nameInp));
@@ -1813,6 +1902,7 @@ function openGifModal() {
   if (!state.gifsEnabled) { toast('GIFs aren’t configured on the server'); return; }
   const search = el('input', 'gif-search');
   search.placeholder = 'Search Tenor…';
+  search.spellcheck = false;
   const grid = el('div', 'gif-grid');
   const status = el('p', 'gif-status mono', 'LOADING…');
   const body = el('div', 'gif-wrap');
@@ -1876,7 +1966,8 @@ function openSettings() {
     factRow('USERNAME', '@' + state.me.username),
     factRow('EMAIL', state.me.email),
     factRow('MEMBER SINCE', new Date(state.me.createdAt)
-      .toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' }).toUpperCase())
+      .toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' }).toUpperCase()),
+    factRow('SERVERS', String(state.servers.length))
   );
   settingsApi.textContent = API_BASE;
 }
@@ -1951,6 +2042,8 @@ menuBtn.append(icon('menu'));
 membersToggle.append(icon('users'));
 settingsClose.append(icon('x'));
 jumpBtn.append(icon('arrow-down'));
+replyCancel.append(icon('x'));                 // FIX: button was empty
+pendingImageRemove.append(icon('x'));          // FIX: button was empty
  $('#replyIconSlot').append(icon('reply', 'mini-icon'));
 
 railHome.addEventListener('click', () => goHome());
@@ -1990,11 +2083,26 @@ menuBtn.addEventListener('click', openSidebarDrawer);
 emptyCtaFriends.addEventListener('click', () => { goHome('add'); openSidebarDrawer(); });
 emptyCtaServer.addEventListener('click', openAddServerModal);
 
+/* FIX: clicking anywhere outside the popup closes the mention list */
+document.addEventListener('mousedown', (e) => {
+  if (!mentionPop.hidden && !mentionPop.contains(e.target) && e.target !== composerInput) {
+    hideMentionPop();
+  }
+});
+
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') { closeSettings(); closeDrawers(); }
   if (e.key === '/' && !e.ctrlKey && !e.metaKey && state.route) {
     const tag = document.activeElement && document.activeElement.tagName;
     if (tag !== 'INPUT' && tag !== 'TEXTAREA') { e.preventDefault(); composerInput.focus(); }
+  }
+});
+
+/* gentle refresh when the tab comes back */
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && state.me && state.connectedOnce) {
+    loadFriendsThrottled();
+    loadServersThrottled();
   }
 });
 
