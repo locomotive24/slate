@@ -9,7 +9,7 @@ const IS_LOCAL   = ['localhost', '127.0.0.1'].includes(location.hostname);
 
 const API_BASE = (
   QUERY_API || STORED_API ||
-  (IS_LOCAL ? 'http://localhost:4000' : 'https://your-render-service.onrender.com')
+  (IS_LOCAL ? 'http://localhost:4000' : 'https://slate-e6hp.onrender.com')
 ).replace(/\/+$/, '');
 
 const LS = { token: 'slate:token', theme: 'slate:theme', accent: 'slate:accent', members: 'slate:members' };
