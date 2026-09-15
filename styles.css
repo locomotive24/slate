@@ -481,7 +481,7 @@ a { color: var(--accent); }
 .swatch:hover { transform: scale(1.12); }
 .swatch.is-active { border-color: var(--text); }
 .swatch-custom { border-style: dashed; border-color: var(--faint); display: inline-flex; align-items: center; justify-content: center; color: var(--muted); overflow: hidden; }
-.swatch-custom input { position: absolute; inset: -8px; opacity: 0; cursor: pointer; }
+.swatch-custom input { position: absolute; inset: 0; opacity: 0; cursor: pointer; }
 .account-facts { margin-bottom: 20px; }
 .fact-row { display: flex; justify-content: space-between; gap: 12px; padding: 9px 0; border-bottom: 1px solid var(--line); font-size: 11px; }
 .fact-row dt { color: var(--faint); letter-spacing: .1em; }
