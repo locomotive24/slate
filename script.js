@@ -9,7 +9,7 @@ const IS_LOCAL   = ['localhost', '127.0.0.1'].includes(location.hostname);
 
 const API_BASE = (
   QUERY_API || STORED_API ||
-  (IS_LOCAL ? 'http://localhost:4000' : 'https://slate-e6hp.onrender.com')
+  (IS_LOCAL ? 'http://localhost:4000' : 'https://your-render-service.onrender.com')
 ).replace(/\/+$/, '');
 
 const LS = { token: 'slate:token', theme: 'slate:theme', accent: 'slate:accent', members: 'slate:members' };
@@ -37,12 +37,13 @@ const state = {
   online: new Set(),
   sidebarMode: 'friends',
   route: null,
-  homeTab: 'online',                 // 'online' | 'all' | 'pending' | 'add'
+  homeTab: 'online',
   addFriendQ: '',
   addFriendResults: null,
   messages: [],
   authors: {},
-  unread: {},
+  unread: {},                 // any new messages per conversation
+  unreadMentions: {},         // PINGS only (DMs + @mentions) — drives badges/title/sound
   typers: new Map(),
   socket: null,
   connectedOnce: false,
@@ -263,7 +264,10 @@ function renderText(text) {
   if (idx < text.length) frag.append(...linkify(text.slice(idx)));
   return frag;
 }
-/* ---------- notification ping + favicon badge ---------- */
+
+/* =====================================================================
+   NOTIFICATION PING + FAVICON BADGE
+===================================================================== */
 let audioCtx = null, lastPingAt = 0;
 function playPing() {
   try {
@@ -313,6 +317,7 @@ function updateFaviconBadge(total) {
   ctx.fillText(total > 9 ? '9+' : String(total), 32, 28);
   link.href = cv.toDataURL('image/png');
 }
+
 /* =====================================================================
    THEME & ACCENT
 ===================================================================== */
@@ -366,7 +371,6 @@ function buildSwatches() {
   wrap.append(custom);
   markActiveSwatch(cur);
 }
-
 function markActiveSwatch(hex) {
   const h = String(hex || '').toLowerCase();
   let matched = false;
@@ -394,9 +398,10 @@ function syncOnlineFrom(list) {
   for (const u of list) { if (u.online) state.online.add(u.id); else state.online.delete(u.id); }
 }
 function updateTitle() {
-  const total = Object.values(state.unread).reduce((a, b) => a + b, 0);
-  document.title = (total ? `(${total}) ` : '') + 'slate · realtime chat';
-  updateFaviconBadge(total);
+  // like Discord: the title + favicon count PINGS, not every message
+  const pings = Object.values(state.unreadMentions).reduce((a, b) => a + b, 0);
+  document.title = (pings ? `(${pings}) ` : '') + 'slate · realtime chat';
+  updateFaviconBadge(pings);
 }
 function renderAll() {
   renderRail(); renderSidebar(); renderChatChrome(); renderMembers();
@@ -712,9 +717,16 @@ function onNewMessage(m) {
   }
   if (m.authorId === state.me.id || !key) return;
   state.unread[key] = (state.unread[key] || 0) + 1;
+
+  // Discord-style: DMs always count as a ping; channel messages only when mentioned
+  const isPing = (m.info && m.info.type === 'dm') ||
+    (Array.isArray(m.mentions) && m.mentions.includes(state.me.id));
+  if (isPing) {
+    state.unreadMentions[key] = (state.unreadMentions[key] || 0) + 1;
+    playPing();
+  }
   renderRail(); renderSidebar();
   updateTitle();
-  if (m.info && m.info.type === 'dm') playPing();
 }
 function onMessageDeleted(d) {
   const r = state.route;
@@ -738,10 +750,10 @@ function canDeleteMessage(m) {
   if (m.deleted) return false;
   if (m.authorId === state.me.id) return true;
   const r = state.route;
-  if (r && r.type === 'dm') return true; // either participant in a DM
+  if (r && r.type === 'dm') return true;
   if (r && r.type === 'channel') {
     const s = state.servers.find(x => x.id === r.serverId);
-    if (s && s.ownerId === state.me.id) return true; // server owner
+    if (s && s.ownerId === state.me.id) return true;
   }
   return false;
 }
@@ -793,6 +805,10 @@ function messageNode(m, opts = {}) {
   if (m.image) {
     const img = el('img', 'msg-image');
     img.src = m.image; img.alt = 'image'; img.loading = 'lazy';
+    img.addEventListener('error', () => {
+      const fb = el('div', 'img-broken mono', 'IMAGE UNAVAILABLE');
+      img.replaceWith(fb);
+    });
     img.addEventListener('click', () => openLightbox(m.image));
     body.append(img);
   }
@@ -808,6 +824,18 @@ function messageNode(m, opts = {}) {
   }
   row.append(acts);
   return row;
+}
+
+/* guard: one malformed message can never freeze the whole render */
+function safeMessageNode(m, opts) {
+  try { return messageNode(m, opts); }
+  catch (e) {
+    console.warn('[slate] skipping a malformed message:', e);
+    const row = el('div', 'msg');
+    const body = el('div', 'msg-body msg-text msg-text-deleted', 'message could not be displayed');
+    row.append(el('span', 'msg-spacer'), body);
+    return row;
+  }
 }
 
 function startReply(m) {
@@ -856,7 +884,7 @@ function renderHistory(opts = {}) {
       messagesEl.append(el('div', 'day-div', fmtDay(m.createdAt)));
       prev = null;
     }
-    messagesEl.append(messageNode(m, {
+    messagesEl.append(safeMessageNode(m, {
       compact: isCompact(prev, m),
       delay: opts.instant ? 0 : Math.min(i * 12, 380)
     }));
@@ -867,7 +895,7 @@ function renderHistory(opts = {}) {
 function renderMessageAppend(m) {
   const prev = state.messages.length > 1 ? state.messages[state.messages.length - 2] : null;
   if (dayChanged(prev, m)) messagesEl.append(el('div', 'day-div', fmtDay(m.createdAt)));
-  messagesEl.append(messageNode(m, { compact: isCompact(prev, m) }));
+  messagesEl.append(safeMessageNode(m, { compact: isCompact(prev, m) }));
   chatEmpty.hidden = true;
 }
 async function loadOlderMessages() {
@@ -897,6 +925,7 @@ function openChannel(serverId, channelId) {
   state.sidebarMode = serverId;
   state.route = { type: 'channel', serverId, channelId };
   state.unread['c:' + channelId] = 0;
+  state.unreadMentions['c:' + channelId] = 0;
   updateTitle();
   openRoom();
 }
@@ -904,6 +933,7 @@ function openDm(userId) {
   state.sidebarMode = 'friends';
   state.route = { type: 'dm', userId };
   state.unread['dm:' + userId] = 0;
+  state.unreadMentions['dm:' + userId] = 0;
   updateTitle();
   openRoom();
 }
@@ -963,8 +993,10 @@ function renderRail() {
     } else {
       b.append(el('span', '', serverInitials(s.name)));
     }
-    const unread = s.channels.reduce((acc, c) => acc + (state.unread['c:' + c.id] || 0), 0);
-    if (unread) b.append(el('span', 'rail-badge mono', unread > 9 ? '9+' : String(unread)));
+    const unread = s.channels.reduce((a, c) => a + (state.unread['c:' + c.id] || 0), 0);
+    const pings = s.channels.reduce((a, c) => a + (state.unreadMentions['c:' + c.id] || 0), 0);
+    if (pings) b.append(el('span', 'rail-badge mono', pings > 9 ? '9+' : String(pings)));
+    else if (unread) b.append(el('span', 'rail-dot'));
     b.addEventListener('click', () => openChannel(s.id, s.channels[0].id));
     return b;
   }));
@@ -1015,18 +1047,20 @@ function renderDmSidebar() {
     row.append(avatarEl(u, { size: 30, showPresence: true, online: u.online }));
     row.append(el('span', 'row-label', u.displayName));
     const un = state.unread['dm:' + u.id] || 0;
-    if (un && !active) row.append(el('span', 'badge mono', un > 9 ? '9+' : String(un)));
+    // DMs always count as pings → accent-colored badge
+    if (un && !active) row.append(el('span', 'badge badge-mention mono', un > 9 ? '9+' : String(un)));
     row.addEventListener('click', () => openDm(u.id));
     sidebarBody.append(row);
   }
 }
 function renderServerSidebar(s) {
+  const isOwner = s.ownerId === state.me.id;
   const head = el('div', 'side-head side-head-row');
   const titles = el('div');
   titles.append(el('h3', 'side-title', s.name));
   titles.append(el('p', 'side-sub mono', `${s.members.length} MEMBERS`));
   head.append(titles);
-  if (s.ownerId === state.me.id) {
+  if (isOwner) {
     const gear = iconBtn('sliders', '', 'Server settings');
     gear.addEventListener('click', () => openServerSettingsModal(s));
     head.append(gear);
@@ -1039,14 +1073,20 @@ function renderServerSidebar(s) {
     row.append(icon('hash', 'row-icon'));
     row.append(el('span', 'row-label', c.name));
     const u = state.unread['c:' + c.id] || 0;
-    if (u && !active) row.append(el('span', 'badge mono', u > 9 ? '9+' : String(u)));
+    const p = state.unreadMentions['c:' + c.id] || 0;
+    if (!active && p) row.append(el('span', 'badge badge-mention mono', p > 9 ? '9+' : String(p)));
+    else if (!active && u) row.append(el('span', 'badge mono', u > 9 ? '9+' : String(u)));
     row.addEventListener('click', () => openChannel(s.id, c.id));
     sidebarBody.append(row);
   }
-  const addCh = el('button', 'side-row side-add');
-  addCh.append(icon('plus', 'row-icon'), el('span', 'row-label', 'New channel'));
-  addCh.addEventListener('click', openNewChannelModal);
-  sidebarBody.append(addCh);
+
+  // only the owner can add channels (and the official server has no owner)
+  if (isOwner) {
+    const addCh = el('button', 'side-row side-add');
+    addCh.append(icon('plus', 'row-icon'), el('span', 'row-label', 'New channel'));
+    addCh.addEventListener('click', openNewChannelModal);
+    sidebarBody.append(addCh);
+  }
 
   const inv = el('div', 'invite-row mono');
   inv.append(el('span', 'invite-label', 'INVITE'));
@@ -1171,7 +1211,7 @@ function confirmRemoveFriend(u) {
   });
 }
 
-/* ---------- Add Friend tab (search that survives re-renders) ---------- */
+/* ---------- Add Friend tab ---------- */
 let addFriendDeb = null, addFriendSeq = 0;
 function renderAddFriend() {
   const wrap = el('div', 'add-friend');
@@ -1482,12 +1522,17 @@ sendBtn.addEventListener('click', () => sendMessage());
 /* ---------- image attachment ---------- */
 function fileToImage(file) {
   return new Promise((resolve, reject) => {
-    // small GIFs keep their animation; everything else gets resized to a JPEG
-    if (file.type === 'image/gif' && file.size < 400000) {
-      const r = new FileReader();
-      r.onload = () => resolve(r.result);
-      r.onerror = () => reject(new Error('Could not read that image'));
-      r.readAsDataURL(file);
+    // GIFs keep their animation, but must be small enough to survive
+    // the base64 round-trip to the server (280KB file ≈ 373KB encoded)
+    if (file.type === 'image/gif') {
+      if (file.size < 280000) {
+        const r = new FileReader();
+        r.onload = () => resolve(r.result);
+        r.onerror = () => reject(new Error('Could not read that image'));
+        r.readAsDataURL(file);
+      } else {
+        reject(new Error('GIF files must be under 280KB — use the GIF picker for bigger ones'));
+      }
       return;
     }
     const img = new Image();
@@ -1605,6 +1650,8 @@ function openAddServerModal() {
 function openNewChannelModal() {
   const s = state.servers.find(x => x.id === state.sidebarMode);
   if (!s) return;
+  if (s.official) { toast('The community server can’t be edited'); return; }
+  if (s.ownerId !== state.me.id) { toast('Only the server owner can create channels'); return; }
   const inp = el('input'); inp.placeholder = 'e.g. design-crit';
   const err = el('p', 'form-error mono'); err.hidden = true;
   const body = el('div');
@@ -1644,6 +1691,7 @@ function confirmLeaveServer(s) {
   });
 }
 function openServerSettingsModal(s) {
+  if (s.official) { toast('The community server can’t be edited'); return; }
   let iconPreview = s.icon || null;
   const nameInp = el('input'); nameInp.maxLength = 40; nameInp.value = s.name;
   const err = el('p', 'form-error mono'); err.hidden = true;
@@ -1715,6 +1763,7 @@ function openGifModal() {
         img.src = g.preview || g.url;
         img.loading = 'lazy';
         img.alt = g.desc || '';
+        img.addEventListener('error', () => item.remove());
         item.append(img);
         item.addEventListener('click', () => { close(); sendMessage({ image: g.url }); });
         return item;
