@@ -120,7 +120,7 @@ function parseMentions(text, contextUserIds) {
 function validImage(img) {
   if (img == null) return true;
   if (typeof img !== 'string') return false;
-  if (img.startsWith('data:image/') && img.length < 520000) return true;
+  if (img.startsWith('data:image/') && img.length < 600000) return true;
   if (/^https:\/\/\S+$/.test(img) && img.length < 600) return true; // Tenor GIF urls
   return false;
 }
@@ -184,7 +184,7 @@ const originFn = (origin, cb) => {
   return cb(new Error('Blocked by CORS'));
 };
 app.use(cors({ origin: originFn, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }));
-app.use(express.json({ limit: '2mb' })); // bigger limit so image messages fit
+app.use(express.json({ limit: '2mb' }));
 
 if (isDev) {
   app.use((req, res, next) => { res.on('finish', () => console.log(req.method, req.originalUrl, res.statusCode)); next(); });
@@ -569,9 +569,11 @@ app.post('/api/servers', auth, (req, res) => {
   res.json({ server: serializeServer(s) });
 });
 
+/* server settings — owner only, and NEVER the official server */
 app.patch('/api/servers/:id', auth, (req, res) => {
   const s = db.servers[req.params.id];
   if (!s) return bad(res, 404, 'Server not found');
+  if (s.official) return bad(res, 403, 'The community server can’t be edited by anyone');
   if (s.ownerId !== req.user.id) return bad(res, 403, 'Only the server owner can change these settings');
   const { name, icon } = req.body || {};
   if (name !== undefined) {
@@ -603,10 +605,12 @@ app.post('/api/servers/join', auth, (req, res) => {
   res.json({ server: serializeServer(s) });
 });
 
+/* channel creation — owner only, and never in the official server */
 app.post('/api/servers/:id/channels', auth, (req, res) => {
   const s = db.servers[req.params.id];
   if (!s) return bad(res, 404, 'Server not found');
-  if (!s.memberIds.includes(req.user.id)) return bad(res, 403, 'Join the server first');
+  if (s.official) return bad(res, 403, 'The community server can’t be edited by anyone');
+  if (s.ownerId !== req.user.id) return bad(res, 403, 'Only the server owner can create channels');
   const name = String((req.body && req.body.name) || '').trim().toLowerCase().replace(/\s+/g, '-').slice(0, 24);
   if (!/^[a-z0-9_-]{1,24}$/.test(name)) return bad(res, 400, 'Channel name: 1–24 chars — letters, numbers, - and _');
   if (s.channels.some(c => c.name === name)) return bad(res, 409, 'A channel with that name already exists');
