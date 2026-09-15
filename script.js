@@ -21,6 +21,7 @@ function $$(sel, root = document) { return [...root.querySelectorAll(sel)]; }
    STATE
 ===================================================================== */
 const HISTORY_PAGE = 50;
+const MSG_CAP = 500;               // max in-memory messages before trimming
 const ACCENTS = [
   { name: 'Ember',  hex: '#ff5c38' },
   { name: 'Amber',  hex: '#ffb224' },
@@ -42,8 +43,8 @@ const state = {
   addFriendResults: null,
   messages: [],
   authors: {},
-  unread: {},                 // any new messages per conversation
-  unreadMentions: {},         // PINGS only (DMs + @mentions) — drives badges/title/sound
+  unread: {},
+  unreadMentions: {},
   typers: new Map(),
   socket: null,
   connectedOnce: false,
@@ -146,6 +147,7 @@ function avatarEl(user, opts = {}) {
     const img = el('img');
     img.src = user.avatar;
     img.alt = user.displayName || user.username || '';
+    img.decoding = 'async';
     wrap.append(img);
   } else {
     wrap.append(el('span', 'avatar-fallback',
@@ -296,21 +298,28 @@ function playPing() {
   } catch { /* audio not available — ignore */ }
 }
 
+let lastBadgeKey = '';
 function updateFaviconBadge(total) {
   const link = document.querySelector('link[rel="icon"]');
   if (!link) return;
+  const css = getComputedStyle(document.documentElement);
+  const accent = css.getPropertyValue('--accent').trim() || '#ff5c38';
+  const onAccent = css.getPropertyValue('--on-accent').trim() || '#ffffff';
+  // only re-encode the PNG when the number or color actually changed
+  const key = total + '|' + accent;
+  if (key === lastBadgeKey) return;
+  lastBadgeKey = key;
   if (!total) { link.href = 'favicon.svg'; return; }
   const cv = document.createElement('canvas');
   cv.width = cv.height = 64;
   const ctx = cv.getContext('2d');
-  const css = getComputedStyle(document.documentElement);
   ctx.fillStyle = '#141417';
   ctx.fillRect(0, 0, 64, 64);
-  ctx.fillStyle = css.getPropertyValue('--accent').trim() || '#ff5c38';
+  ctx.fillStyle = accent;
   ctx.beginPath();
   ctx.arc(32, 27, 23, 0, Math.PI * 2);
   ctx.fill();
-  ctx.fillStyle = css.getPropertyValue('--on-accent').trim() || '#ffffff';
+  ctx.fillStyle = onAccent;
   ctx.font = 'bold 26px monospace';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
@@ -398,7 +407,6 @@ function syncOnlineFrom(list) {
   for (const u of list) { if (u.online) state.online.add(u.id); else state.online.delete(u.id); }
 }
 function updateTitle() {
-  // like Discord: the title + favicon count PINGS, not every message
   const pings = Object.values(state.unreadMentions).reduce((a, b) => a + b, 0);
   document.title = (pings ? `(${pings}) ` : '') + 'slate · realtime chat';
   updateFaviconBadge(pings);
@@ -406,6 +414,43 @@ function updateTitle() {
 function renderAll() {
   renderRail(); renderSidebar(); renderChatChrome(); renderMembers();
 }
+
+/* ---------- THE FIX: coalesce event-driven re-renders ----------
+   Presence/user/sync events used to trigger full re-renders one by
+   one — dozens per second during a storm, each recreating avatar
+   images. Now they're merged into at most one render per 300ms.  */
+let renderTimer = null;
+function requestRender() {
+  if (renderTimer) return;
+  renderTimer = setTimeout(() => {
+    renderTimer = null;
+    renderRail(); renderSidebar(); renderChatChrome(); renderMembers();
+  }, 300);
+}
+
+/* ---------- THE FIX: cap in-memory messages in long rooms ---------- */
+function trimMessagesIfNeeded() {
+  if (state.messages.length <= MSG_CAP || !isPinned()) return;
+  state.messages = state.messages.slice(-300);
+  messagesEl.classList.add('no-anim');
+  renderHistory({ instant: true });
+  requestAnimationFrame(() => messagesEl.classList.remove('no-anim'));
+  chatScroll.scrollTop = chatScroll.scrollHeight;
+}
+
+/* ---------- THE FIX: throttle background data refreshes ---------- */
+let lastFriendsFetch = 0, lastServersFetch = 0, lastResyncAt = 0;
+function loadFriendsThrottled() {
+  if (Date.now() - lastFriendsFetch < 2000) return;
+  lastFriendsFetch = Date.now();
+  loadFriends();
+}
+function loadServersThrottled() {
+  if (Date.now() - lastServersFetch < 2000) return;
+  lastServersFetch = Date.now();
+  loadServers();
+}
+
 function closeDrawers() {
   sidebar.classList.remove('open'); scrimSidebar.classList.remove('show');
   membersPanel.classList.remove('open'); scrimMembers.classList.remove('show');
@@ -466,13 +511,14 @@ async function withAuthBusy(btn, errEl, fn) {
   finally { btn.disabled = false; }
 }
 
-/* ---------- latency seismograph ---------- */
+/* ---------- latency seismograph (login screen only — it STOPS after login) ---------- */
 const pingHistory = [];
 function startPingMeter() {
   const canvas = $('#pingCanvas');
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   const loop = async () => {
+    if (authView.hidden) return; // logged in — the meter's job is done
     const t0 = performance.now();
     let ms = null, stats = null;
     try {
@@ -576,7 +622,7 @@ async function loadServers() {
   if (state.sidebarMode !== 'friends' && !state.servers.find(s => s.id === state.sidebarMode)) {
     state.sidebarMode = 'friends';
   }
-  renderRail(); renderSidebar(); renderMembers();
+  requestRender();
 }
 async function loadFriends() {
   try {
@@ -585,7 +631,7 @@ async function loadFriends() {
     syncOnlineFrom([...d.friends, ...d.incoming, ...d.outgoing]);
   } catch { return; }
   if (state.route && state.route.type === 'dm' && !getPeer(state.route.userId)) state.route = null;
-  renderRail(); renderSidebar(); renderMembers(); renderChatChrome();
+  requestRender();
 }
 async function resync() {
   await Promise.all([loadServers(), loadFriends()]);
@@ -611,7 +657,11 @@ function connectSocket(token) {
   state.socket = socket;
   socket.on('connect', () => {
     connBanner.hidden = true;
-    if (state.connectedOnce) resync();
+    // resync after a drop — but at most once every 5s if the connection flaps
+    if (state.connectedOnce && Date.now() - lastResyncAt > 5000) {
+      lastResyncAt = Date.now();
+      resync();
+    }
     state.connectedOnce = true;
   });
   socket.on('disconnect', () => { if (state.me) connBanner.hidden = false; });
@@ -623,28 +673,31 @@ function connectSocket(token) {
   socket.on('mention', onMention);
   socket.on('typing', onTyping);
   socket.on('presence:update', onPresence);
-  socket.on('friend:request', (d) => { toast(`${d.user.displayName} wants to be your friend`); loadFriends(); });
-  socket.on('friend:accepted', (d) => { toast(`${d.user.displayName} accepted your request`, 'success'); loadFriends(); });
-  socket.on('friends:sync', loadFriends);
+  socket.on('friend:request', (d) => { toast(`${d.user.displayName} wants to be your friend`); loadFriendsThrottled(); });
+  socket.on('friend:accepted', (d) => { toast(`${d.user.displayName} accepted your request`, 'success'); loadFriendsThrottled(); });
+  socket.on('friends:sync', loadFriendsThrottled);
   socket.on('user:update', onUserUpdate);
-  socket.on('server:sync', loadServers);
+  socket.on('server:sync', loadServersThrottled);
 }
 function onUserUpdate({ user }) {
   if (!user) return;
   state.authors[user.id] = user;
   if (state.me && user.id === state.me.id) {
     state.me = { ...state.me, ...user };
-    renderRail();
   }
   state.friends.friends = state.friends.friends.map(f => (f.id === user.id ? { ...f, ...user } : f));
-  renderSidebar(); renderMembers(); renderChatChrome();
+  requestRender();
 }
 function onPresence({ userId, online }) {
   if (online) state.online.add(userId); else state.online.delete(userId);
   for (const f of state.friends.friends) if (f.id === userId) f.online = online;
   for (const s of state.servers) for (const m of s.members) if (m.id === userId) m.online = online;
-  renderSidebar(); renderMembers(); renderChatChrome();
+  requestRender();
 }
+
+/* THE FIX: mention toasts/sounds only when you're NOT already looking
+   at that conversation. No more "document.hidden" pings while you're
+   sitting in the room with another window focused.                    */
 function onMention(d) {
   if (!d || !d.from) return;
   const r = state.route;
@@ -653,11 +706,10 @@ function onMention(d) {
     if (r.type === 'channel' && d.info.type === 'channel') current = d.info.channelId === r.channelId;
     if (r.type === 'dm' && d.info.type === 'dm') current = d.info.userIds && d.info.userIds.includes(r.userId);
   }
-  if (!current || document.hidden) {
-    const where = (d.place && d.place.channelName) ? '#' + d.place.channelName : 'a direct message';
-    toast(`${d.from.displayName} mentioned you in ${where}`);
-    playPing();
-  }
+  if (current) return; // you're watching that conversation — stay quiet
+  const where = (d.place && d.place.channelName) ? '#' + d.place.channelName : 'a direct message';
+  toast(`${d.from.displayName} mentioned you in ${where}`);
+  // the sound itself is handled by onNewMessage
 }
 function onTyping(t) {
   const r = state.route;
@@ -702,6 +754,10 @@ function isCurrentMessage(m) {
   if (r.type === 'channel') return m.type === 'channel' && m.room === r.channelId;
   return m.type === 'dm' && m.info && m.info.userIds && m.info.userIds.includes(r.userId);
 }
+
+/* THE FIX: one strict sound rule —
+   a ding ONLY when (a) it's a DM, or (b) you were @mentioned,
+   AND you're not currently viewing that conversation (early return above). */
 function onNewMessage(m) {
   if (m.author) state.authors[m.authorId] = m.author;
   const key = messageKeyFor(m);
@@ -713,19 +769,19 @@ function onNewMessage(m) {
     renderMessageAppend(m);
     renderTyping();
     if (pinned) chatScroll.scrollTop = chatScroll.scrollHeight;
+    trimMessagesIfNeeded();
     return;
   }
   if (m.authorId === state.me.id || !key) return;
   state.unread[key] = (state.unread[key] || 0) + 1;
 
-  // Discord-style: DMs always count as a ping; channel messages only when mentioned
   const isPing = (m.info && m.info.type === 'dm') ||
     (Array.isArray(m.mentions) && m.mentions.includes(state.me.id));
   if (isPing) {
     state.unreadMentions[key] = (state.unreadMentions[key] || 0) + 1;
     playPing();
   }
-  renderRail(); renderSidebar();
+  requestRender();
   updateTitle();
 }
 function onMessageDeleted(d) {
@@ -804,7 +860,7 @@ function messageNode(m, opts = {}) {
 
   if (m.image) {
     const img = el('img', 'msg-image');
-    img.src = m.image; img.alt = 'image'; img.loading = 'lazy';
+    img.src = m.image; img.alt = 'image'; img.loading = 'lazy'; img.decoding = 'async';
     img.addEventListener('error', () => {
       const fb = el('div', 'img-broken mono', 'IMAGE UNAVAILABLE');
       img.replaceWith(fb);
@@ -826,7 +882,6 @@ function messageNode(m, opts = {}) {
   return row;
 }
 
-/* guard: one malformed message can never freeze the whole render */
 function safeMessageNode(m, opts) {
   try { return messageNode(m, opts); }
   catch (e) {
@@ -988,7 +1043,7 @@ function renderRail() {
     const b = el('button', 'rail-server' + (state.sidebarMode === s.id ? ' is-active' : ''));
     b.title = s.name + (s.official ? ' · official' : '');
     if (s.icon) {
-      const img = el('img'); img.src = s.icon; img.alt = s.name;
+      const img = el('img'); img.src = s.icon; img.alt = s.name; img.decoding = 'async';
       b.append(img);
     } else {
       b.append(el('span', '', serverInitials(s.name)));
@@ -1006,7 +1061,7 @@ function renderRail() {
 }
 
 /* =====================================================================
-   RENDER: SIDEBAR (home mode = DM list)
+   RENDER: SIDEBAR
 ===================================================================== */
 function renderSidebar() {
   sidebarBody.replaceChildren();
@@ -1047,7 +1102,6 @@ function renderDmSidebar() {
     row.append(avatarEl(u, { size: 30, showPresence: true, online: u.online }));
     row.append(el('span', 'row-label', u.displayName));
     const un = state.unread['dm:' + u.id] || 0;
-    // DMs always count as pings → accent-colored badge
     if (un && !active) row.append(el('span', 'badge badge-mention mono', un > 9 ? '9+' : String(un)));
     row.addEventListener('click', () => openDm(u.id));
     sidebarBody.append(row);
@@ -1080,7 +1134,6 @@ function renderServerSidebar(s) {
     sidebarBody.append(row);
   }
 
-  // only the owner can add channels (and the official server has no owner)
   if (isOwner) {
     const addCh = el('button', 'side-row side-add');
     addCh.append(icon('plus', 'row-icon'), el('span', 'row-label', 'New channel'));
@@ -1105,7 +1158,7 @@ function renderServerSidebar(s) {
 }
 
 /* =====================================================================
-   HOME VIEW (Discord-style friends page)
+   HOME VIEW
 ===================================================================== */
 function renderHomeTabs() {
   const f = state.friends;
@@ -1129,7 +1182,14 @@ function renderHomeTabs() {
     return b;
   }));
 }
+
+/* THE FIX: home rebuilds keep their scroll position */
 function renderHome() {
+  const keepScroll = homeBody.scrollTop;
+  buildHome();
+  homeBody.scrollTop = keepScroll;
+}
+function buildHome() {
   homeBody.replaceChildren();
   const f = state.friends;
   if (state.homeTab === 'add') { renderAddFriend(); return; }
@@ -1211,9 +1271,15 @@ function confirmRemoveFriend(u) {
   });
 }
 
-/* ---------- Add Friend tab ---------- */
+/* ---------- Add Friend tab — search box survives re-renders now ---------- */
 let addFriendDeb = null, addFriendSeq = 0;
 function renderAddFriend() {
+  // THE FIX: if a background update rebuilds this view while you're
+  // typing, your focus and caret position are preserved
+  const prev = $('.add-friend-input');
+  const wasFocused = !!prev && document.activeElement === prev;
+  const caret = prev ? prev.selectionStart : 0;
+
   const wrap = el('div', 'add-friend');
   const box = el('div', 'add-friend-box');
   box.append(icon('search'));
@@ -1226,6 +1292,11 @@ function renderAddFriend() {
   const results = el('div', 'add-friend-results');
   wrap.append(box, status, results);
   homeBody.append(wrap);
+
+  if (wasFocused) {
+    inp.focus();
+    try { inp.setSelectionRange(caret, caret); } catch { /* ignore */ }
+  }
 
   if (state.addFriendResults) updateAddFriendResults();
   else { status.textContent = 'SEARCH FOR SOMEONE BY USERNAME OR DISPLAY NAME'; status.hidden = false; }
@@ -1403,7 +1474,7 @@ function renderMembers() {
 }
 
 /* =====================================================================
-   COMPOSER (typing, mentions, images, gifs, replies)
+   COMPOSER
 ===================================================================== */
 function autosize() {
   composerInput.style.height = 'auto';
@@ -1522,8 +1593,6 @@ sendBtn.addEventListener('click', () => sendMessage());
 /* ---------- image attachment ---------- */
 function fileToImage(file) {
   return new Promise((resolve, reject) => {
-    // GIFs keep their animation, but must be small enough to survive
-    // the base64 round-trip to the server (280KB file ≈ 373KB encoded)
     if (file.type === 'image/gif') {
       if (file.size < 280000) {
         const r = new FileReader();
@@ -1590,7 +1659,7 @@ function sendMessage(extra = {}) {
 chatScroll.addEventListener('scroll', () => {
   const far = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight > 300;
   jumpBtn.classList.toggle('show', far);
-});
+}, { passive: true });
 jumpBtn.addEventListener('click', () =>
   chatScroll.scrollTo({ top: chatScroll.scrollHeight, behavior: 'smooth' }));
 
