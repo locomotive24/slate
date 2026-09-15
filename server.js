@@ -73,7 +73,7 @@ async function initMongo() {
 const upsertUser = (u) => usersCol.replaceOne({ id: u.id }, clone(u), { upsert: true });
 const upsertServer = (s) => serversCol.replaceOne({ id: s.id }, clone(s), { upsert: true });
 const insertMessage = (m) => messagesCol.insertOne({ ...clone(m), _id: m.id });
-const replaceMessage = (m) => messagesCol.replaceOne({ _id: m.id }, clone(m) });
+const replaceMessage = (m) => messagesCol.replaceOne({ _id: m.id }, clone(m));
 async function findMessageById(id) {
   const d = await messagesCol.findOne({ _id: id });
   return d ? stripDoc(d) : null;
