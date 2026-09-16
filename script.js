@@ -21,7 +21,7 @@ function $$(sel, root = document) { return [...root.querySelectorAll(sel)]; }
    STATE
 ===================================================================== */
 const HISTORY_PAGE = 50;
-const MSG_CAP = 300;               // trim in-memory messages past this (when pinned)
+const MSG_CAP = 300;               // trim in-memory messages past this (only when pinned)
 const MSG_KEEP = 150;              // what we keep after a trim
 const ACCENTS = [
   { name: 'Ember',  hex: '#ff5c38' },
@@ -44,8 +44,8 @@ const state = {
   addFriendResults: null,
   messages: [],
   authors: {},
-  unread: {},
-  unreadMentions: {},
+  unread: {},                 // ALL unread messages — drives the title counter
+  unreadMentions: {},         // pings only — drives accent badges + sound
   typers: new Map(),
   socket: null,
   connectedOnce: false,
@@ -308,7 +308,6 @@ function updateFaviconBadge(total) {
   const css = getComputedStyle(document.documentElement);
   const accent = css.getPropertyValue('--accent').trim() || '#ff5c38';
   const onAccent = css.getPropertyValue('--on-accent').trim() || '#ffffff';
-  // only re-encode the PNG when the number or color actually changed
   const key = total + '|' + accent;
   if (key === lastBadgeKey) return;
   lastBadgeKey = key;
@@ -402,7 +401,14 @@ function markActiveSwatch(hex) {
 const dmRoomKey = (a, b) => { const [x, y] = [a, b].sort(); return `dm:${x}:${y}`; };
 const getPeer = (id) => state.friends.friends.find(f => f.id === id) || state.authors[id] || null;
 const authorName = (id) => (state.authors[id] && state.authors[id].displayName) || 'unknown';
-const isPinned = () => chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 140;
+
+/* SCROLLING RULES — no timers, no fighting:
+   • auto-scroll ONLY while within 80px of the bottom
+   • the moment you're farther than 80px up, NOTHING moves the scrollbar
+     again until you scroll back down yourself
+   • images finishing decode late re-glue only if you're at the bottom */
+const isPinned = () => chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 80;
+
 function serverInitials(name) {
   return String(name || '').trim().split(/\s+/).slice(0, 2).map(w => w[0] || '').join('').toUpperCase() || 'S';
 }
@@ -410,17 +416,23 @@ function syncOnlineFrom(list) {
   for (const u of list) { if (u.online) state.online.add(u.id); else state.online.delete(u.id); }
 }
 function updateTitle() {
-  const pings = Object.values(state.unreadMentions).reduce((a, b) => a + b, 0);
-  document.title = (pings ? `(${pings}) ` : '') + 'slate · realtime chat';
-  updateFaviconBadge(pings);
+  // counts ALL unread — the number is always visible in the tab title
+  const total = Object.values(state.unread).reduce((a, b) => a + b, 0);
+  document.title = (total ? `(${total}) ` : '') + 'Slate';
+  updateFaviconBadge(total);
 }
 function renderAll() {
   renderRail(); renderSidebar(); renderChatChrome(); renderMembers();
 }
 
-/* ---------- coalesce event-driven re-renders (max one per 300ms) ----------
-   AND: hidden tabs skip painting entirely — a background tab burns zero
-   CPU on renders, and gets one fresh render the moment you return. */
+/* ---------- view mode: ONLY explicit navigation can switch it ----------
+   Background events (presence, friends:sync, reconnects…) can no longer
+   flip the app into home mode — which is what made the composer vanish. */
+function setView(mode) {
+  chatSection.classList.toggle('home-mode', mode === 'home');
+}
+
+/* ---------- coalesce event-driven re-renders (max one per 300ms) ---------- */
 let renderTimer = null;
 function requestRender() {
   if (renderTimer) return;
@@ -431,14 +443,6 @@ function requestRender() {
   }, 300);
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) requestRender(); });
-
-/* =====================================================================
-   SCROLL ENGINE — "stick to bottom" window
-   While stickBottomUntil is in the future, the view re-pins itself to
-   the newest message — including when images finish decoding LATE.
-   Scrolling up on purpose lets the window lapse (no fighting you).
-   Requires `overflow-anchor: none` in styles.css AT ROOT LEVEL.   */
-let stickBottomUntil = 0;
 
 function trimMessagesIfNeeded() {
   if (state.messages.length <= MSG_CAP || !isPinned()) return;
@@ -596,7 +600,7 @@ function enterApp(user, token) {
   appView.classList.add('entering');
   if (localStorage.getItem(LS.members) !== 'off') appView.classList.add('members-on');
   connectSocket(token);
-  renderAll();
+  goHome(); // safe default view; navigation takes over once data loads
   updateTitle();
   api('GET', '/api/features').then(d => {
     state.gifsEnabled = !!d.gifs;
@@ -604,7 +608,6 @@ function enterApp(user, token) {
   }).catch(() => {});
   Promise.all([loadServers(), loadFriends()]).then(() => {
     if (state.servers.length) openChannel(state.servers[0].id, state.servers[0].channels[0].id);
-    else goHome();
   });
 }
 function doLogout(msg) {
@@ -643,14 +646,17 @@ async function loadFriends() {
     state.friends = d;
     syncOnlineFrom([...d.friends, ...d.incoming, ...d.outgoing]);
   } catch { return; }
-  if (state.route && state.route.type === 'dm' && !getPeer(state.route.userId)) state.route = null;
+  // peer genuinely gone (unfriended) → leave the DM cleanly, all at once.
+  // Never a silent half-state that hides the composer.
+  if (state.route && state.route.type === 'dm' && !getPeer(state.route.userId)) {
+    goHome();
+    return;
+  }
   requestRender();
 }
 
-/* THE BIG SCROLLING FIX: reconnects used to wipe and rebuild the whole
-   message list (destroying your scroll position every time the Render
-   connection blipped). Now resync only APPENDS messages you actually
-   missed — if nothing's new, the DOM is never touched at all.        */
+/* reconnects only APPEND messages you actually missed — the DOM (and
+   your scroll position) are never touched if nothing's new */
 async function resync() {
   await Promise.all([loadServers(), loadFriends()]);
   const r = state.route;
@@ -662,7 +668,6 @@ async function resync() {
     Object.assign(state.authors, d.users);
 
     if (!state.messages.length) {
-      // room was empty in memory (e.g. first load failed) — normal render
       state.messages = d.messages;
       state.hasMore = d.messages.length === HISTORY_PAGE;
       renderHistory();
@@ -684,12 +689,18 @@ async function resync() {
 /* =====================================================================
    SOCKET
 ===================================================================== */
+// one malformed event can never wedge the UI — errors are caught & logged
+function safeHandler(fn) {
+  return (...args) => {
+    try { fn(...args); }
+    catch (e) { console.warn('[slate] handler error:', e); }
+  };
+}
 function connectSocket(token) {
   const socket = io(API_BASE, { auth: { token }, transports: ['websocket', 'polling'] });
   state.socket = socket;
   socket.on('connect', () => {
     connBanner.hidden = true;
-    // resync after a drop — at most once every 5s if the connection flaps
     if (state.connectedOnce && Date.now() - lastResyncAt > 5000) {
       lastResyncAt = Date.now();
       resync();
@@ -700,16 +711,16 @@ function connectSocket(token) {
   socket.on('connect_error', (err) => {
     if (String(err.message) === 'auth') doLogout('Your session expired — sign in again');
   });
-  socket.on('message:new', onNewMessage);
-  socket.on('message:delete', onMessageDeleted);
-  socket.on('mention', onMention);
-  socket.on('typing', onTyping);
-  socket.on('presence:update', onPresence);
-  socket.on('friend:request', (d) => { toast(`${d.user.displayName} wants to be your friend`); loadFriendsThrottled(); });
-  socket.on('friend:accepted', (d) => { toast(`${d.user.displayName} accepted your request`, 'success'); loadFriendsThrottled(); });
-  socket.on('friends:sync', loadFriendsThrottled);
-  socket.on('user:update', onUserUpdate);
-  socket.on('server:sync', loadServersThrottled);
+  socket.on('message:new', safeHandler(onNewMessage));
+  socket.on('message:delete', safeHandler(onMessageDeleted));
+  socket.on('mention', safeHandler(onMention));
+  socket.on('typing', safeHandler(onTyping));
+  socket.on('presence:update', safeHandler(onPresence));
+  socket.on('friend:request', safeHandler((d) => { toast(`${d.user.displayName} wants to be your friend`); loadFriendsThrottled(); }));
+  socket.on('friend:accepted', safeHandler((d) => { toast(`${d.user.displayName} accepted your request`, 'success'); loadFriendsThrottled(); }));
+  socket.on('friends:sync', safeHandler(loadFriendsThrottled));
+  socket.on('user:update', safeHandler(onUserUpdate));
+  socket.on('server:sync', safeHandler(loadServersThrottled));
 }
 function onUserUpdate({ user }) {
   if (!user) return;
@@ -739,7 +750,6 @@ function onMention(d) {
   if (current) return;
   const where = (d.place && d.place.channelName) ? '#' + d.place.channelName : 'a direct message';
   toast(`${d.from.displayName} mentioned you in ${where}`);
-  // the sound itself is handled by onNewMessage
 }
 function onTyping(t) {
   const r = state.route;
@@ -793,16 +803,12 @@ function onNewMessage(m) {
   const key = messageKeyFor(m);
 
   if (isCurrentMessage(m)) {
-    // stay glued to the bottom even if an image higher up is still decoding
-    const pinned = isPinned() || Date.now() < stickBottomUntil;
+    const pinned = isPinned();
     state.messages.push(m);
     state.typers.delete(m.authorId);
     renderMessageAppend(m);
     renderTyping();
-    if (pinned) {
-      stickBottomUntil = Date.now() + 1500;
-      chatScroll.scrollTop = chatScroll.scrollHeight;
-    }
+    if (pinned) chatScroll.scrollTop = chatScroll.scrollHeight;
     trimMessagesIfNeeded();
     return;
   }
@@ -821,8 +827,6 @@ function onNewMessage(m) {
 function onMessageDeleted(d) {
   const r = state.route;
   if (!r || !d || !state.me) return;
-  // the DM branch checks WHICH room — deletes in another conversation
-  // can never touch the one you're viewing
   const current = (r.type === 'channel' && d.type === 'channel' && d.room === r.channelId) ||
                   (r.type === 'dm' && d.type === 'dm' && d.room === dmRoomKey(state.me.id, r.userId));
   if (!current) return;
@@ -902,12 +906,9 @@ function messageNode(m, opts = {}) {
       img.replaceWith(fb);
     });
     img.addEventListener('click', () => openLightbox(m.image));
-    // an image finishing decode after we scrolled used to silently
-    // un-pin us — re-glue while sticky
+    // late-decoding image: re-glue ONLY if you're at the bottom
     img.addEventListener('load', () => {
-      if (Date.now() < stickBottomUntil && isCurrentMessage(m)) {
-        chatScroll.scrollTop = chatScroll.scrollHeight;
-      }
+      if (isPinned()) chatScroll.scrollTop = chatScroll.scrollHeight;
     });
     body.append(img);
   }
@@ -971,8 +972,6 @@ function renderHistory(opts = {}) {
   messagesEl.replaceChildren();
   chatEmpty.hidden = list.length > 0;
   if (!list.length) return;
-  // hasMore flag — the old `=== HISTORY_PAGE` check made LOAD OLDER
-  // vanish after exactly one page of history
   if (state.hasMore) {
     const b = el('button', 'older-btn mono', 'LOAD OLDER');
     b.addEventListener('click', loadOlderMessages);
@@ -991,13 +990,8 @@ function renderHistory(opts = {}) {
     prev = m;
   });
   if (!opts.preserveScroll) {
-    // keep re-pinning briefly so late layout (fonts, decoding images)
-    // can't leave you mid-history
-    stickBottomUntil = Math.max(stickBottomUntil, Date.now() + 2000);
     chatScroll.scrollTop = chatScroll.scrollHeight;
-    requestAnimationFrame(() => {
-      if (Date.now() < stickBottomUntil) chatScroll.scrollTop = chatScroll.scrollHeight;
-    });
+    requestAnimationFrame(() => { if (isPinned()) chatScroll.scrollTop = chatScroll.scrollHeight; });
   }
 }
 function renderMessageAppend(m) {
@@ -1015,8 +1009,7 @@ async function loadOlderMessages() {
   try {
     const d = await api('GET', base + '?before=' + first.createdAt);
     if (state.route !== r) return;
-    // FIX: at the end of history just remove the button — do NOT rebuild
-    // (the old code re-rendered with preserveScroll, which reset the view)
+    // end of history → just remove the button, never rebuild the view
     if (!d.messages.length) {
       state.hasMore = false;
       const btn = messagesEl.querySelector('.older-btn');
@@ -1030,10 +1023,7 @@ async function loadOlderMessages() {
     renderHistory({ instant: true, preserveScroll: true });
     requestAnimationFrame(() => messagesEl.classList.remove('no-anim'));
 
-    // anchor the view to the message that used to be at the very top,
-    // and keep re-anchoring while prepended images decode.
-    // (overflow-anchor:none at root level in styles.css + this anchor
-    // does it right — no more fighting the browser's own anchoring.)
+    // anchor the view to the message that used to be at the very top
     const anchor = () => {
       const node = messagesEl.querySelector(`[data-id="${first.id}"]`);
       if (!node) return;
@@ -1050,7 +1040,7 @@ async function loadOlderMessages() {
 }
 
 /* =====================================================================
-   ROUTING
+   ROUTING (the ONLY place the view mode ever changes)
 ===================================================================== */
 function openChannel(serverId, channelId) {
   state.sidebarMode = serverId;
@@ -1058,6 +1048,7 @@ function openChannel(serverId, channelId) {
   state.unread['c:' + channelId] = 0;
   state.unreadMentions['c:' + channelId] = 0;
   updateTitle();
+  setView('room');
   openRoom();
 }
 function openDm(userId) {
@@ -1066,6 +1057,7 @@ function openDm(userId) {
   state.unread['dm:' + userId] = 0;
   state.unreadMentions['dm:' + userId] = 0;
   updateTitle();
+  setView('room');
   openRoom();
 }
 function goHome(tab) {
@@ -1080,6 +1072,7 @@ function goHome(tab) {
   autosize();
   clearComposerExtras();
   closeDrawers();
+  setView('home');
   renderAll();
 }
 async function openRoom() {
@@ -1088,8 +1081,6 @@ async function openRoom() {
   clearComposerExtras();
   composerInput.value = '';
   autosize();
-  // never enter a room with the composer left disabled from a previous
-  // failed load (e.g. a friend who removed you)
   composerBox.classList.remove('disabled');
   renderSidebar(); renderRail(); renderMembers(); renderChatChrome();
   closeDrawers();
@@ -1108,7 +1099,6 @@ async function openRoom() {
     state.hasMore = d.messages.length === HISTORY_PAGE;
     Object.assign(state.authors, d.users);
     if (!state.messages.length) emptyHint.textContent = 'THIS IS THE BEGINNING — SAY HELLO';
-    stickBottomUntil = Date.now() + 2500; // keep pinning while images decode
     renderHistory();
   } catch (e) {
     if (state.route !== current) return;
@@ -1239,8 +1229,6 @@ function renderServerSidebar(s) {
   inv.append(copyBtn);
   sidebarBody.append(inv);
 
-  // the official community server can't be left (and rejoins on every
-  // login anyway) — don't offer a broken button
   if (!s.official) {
     const leave = el('button', 'link-danger mono', 'LEAVE SERVER');
     leave.addEventListener('click', () => confirmLeaveServer(s));
@@ -1274,7 +1262,6 @@ function renderHomeTabs() {
   }));
 }
 
-/* home rebuilds keep their scroll position */
 function renderHome() {
   const keepScroll = homeBody.scrollTop;
   buildHome();
@@ -1365,8 +1352,6 @@ function confirmRemoveFriend(u) {
 /* ---------- Add Friend tab — search box survives re-renders ---------- */
 let addFriendDeb = null, addFriendSeq = 0;
 function renderAddFriend() {
-  // if a background update rebuilds this view while you're typing,
-  // your focus and caret position are preserved
   const prev = $('.add-friend-input');
   const wasFocused = !!prev && document.activeElement === prev;
   const caret = prev ? prev.selectionStart : 0;
@@ -1459,11 +1444,10 @@ function updateAddFriendResults() {
 }
 
 /* =====================================================================
-   RENDER: CHAT CHROME
+   RENDER: CHAT CHROME (display only — never switches the view mode)
 ===================================================================== */
 function renderChatChrome() {
   const r = state.route;
-  chatSection.classList.toggle('home-mode', !r);
   chatTitle.replaceChildren();
 
   if (!r) {
@@ -1490,7 +1474,6 @@ function renderChatChrome() {
     if (!peer) {
       chatTitle.append(el('span', '', '—'));
       chatMeta.textContent = '';
-      composerBox.classList.add('disabled');
       return;
     }
     chatTitle.append(avatarEl(peer, { size: 22 }), el('span', '', peer.displayName));
@@ -2093,6 +2076,7 @@ document.addEventListener('keydown', (e) => {
    BOOT
 ===================================================================== */
 (function init() {
+  document.title = 'Slate';
   setTheme(localStorage.getItem(LS.theme) || 'dark', false);
   setAccent(localStorage.getItem(LS.accent) || '#ff5c38');
   buildSwatches();
