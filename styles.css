@@ -567,11 +567,11 @@ a { color: var(--accent); }
   .msg { padding: 6px 10px; margin: 2px -10px; }
   .composer { padding: 6px 10px 12px; }
   .jump-btn { right: 14px; }
-    .composer-row textarea, .add-friend-input, .field input, .field textarea { font-size: 16px; }
+     .composer-row textarea, .add-friend-input, .field input, .field textarea { font-size: 16px; }
 }
 
 /* ============================================================
-   SCROLL FIXES — must be OUTSIDE the media query (root level)
+   SCROLL FIXES — root level, NOT inside any media query
    ============================================================ */
 .chat-scroll,
 .home-body,
