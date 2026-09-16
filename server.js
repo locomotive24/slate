@@ -258,7 +258,7 @@ io.on('connection', (socket) => {
     const text = typeof p.text === 'string' ? p.text.trim().slice(0, 2000) : '';
     const image = validImage(p.image) ? p.image : null;
     if (!text && !image) return;
-    if (Date.now() - (lastMessageAt.get(user.id) || 0) < 250) return;
+    if (Date.now() - (lastMessageAt.get(user.id) || 0) < 120) return;
     lastMessageAt.set(user.id, Date.now());
 
     try {
