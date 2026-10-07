@@ -231,7 +231,6 @@ const originFn = (origin, cb) => {
 };
 app.use(cors({ origin: originFn, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }));
 app.use(express.json({ limit: '2mb' }));
-app.use(express.static(path.join(__dirname, 'public')));
 
 if (isDev) {
   app.use((req, res, next) => { res.on('finish', () => console.log(req.method, req.originalUrl, res.statusCode)); next(); });
