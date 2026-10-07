@@ -31,6 +31,11 @@ const ACCENTS = [
   { name: 'Sky',    hex: '#41c1e5' },
   { name: 'Orchid', hex: '#c66bff' }
 ];
+const EMOJIS = [
+  '👍','👎','❤️','😂','😮','😢','🙏','🔥','🎉','😡','💯','✅','❌','👀','🤔','😅',
+  '🤝','👋','🤖','⭐','💜','👏','😭','😍','😎','🥳','💤','🚀','☕','🍕','🎮','🎵',
+  '📢','💡','🐱','🐶','🦀','🐙'
+];
 
 const state = {
   me: null,
@@ -44,8 +49,8 @@ const state = {
   addFriendResults: null,
   messages: [],
   authors: {},
-  unread: {},                 // ALL unread messages — drives the title counter
-  unreadMentions: {},         // pings only — drives accent badges + sound
+  unread: {},
+  unreadMentions: {},
   typers: new Map(),
   socket: null,
   connectedOnce: false,
@@ -74,9 +79,10 @@ const emptyCtaFriends = $('#emptyCtaFriends'), emptyCtaServer = $('#emptyCtaServ
 const typingBar = $('#typingBar');
 const composerBox = $('#composerBox'), composerInput = $('#composerInput'), sendBtn = $('#sendBtn');
 const replyBar = $('#replyBar'), replyInfo = $('#replyInfo'), replyCancel = $('#replyCancel');
+const replyIconSlot = $('#replyIconSlot');
 const pendingImageRow = $('#pendingImageRow'), pendingImageThumb = $('#pendingImageThumb');
 const pendingImageRemove = $('#pendingImageRemove');
-const attachBtn = $('#attachBtn'), gifBtn = $('#gifBtn'), imageFile = $('#imageFile');
+const attachBtn = $('#attachBtn'), emojiBtn = $('#emojiBtn'), gifBtn = $('#gifBtn'), imageFile = $('#imageFile');
 const mentionPop = $('#mentionPop');
 const jumpBtn = $('#jumpBtn');
 const membersPanel = $('#membersPanel'), membersHead = $('#membersHead');
@@ -133,6 +139,7 @@ function icon(name, cls = '') {
 function iconBtn(name, extra = '', title = '') {
   const b = el('button', 'icon-btn ' + extra);
   if (title) b.title = title;
+  b.type = 'button';
   b.append(icon(name));
   return b;
 }
@@ -181,6 +188,7 @@ function openModal({ title, body, actions = [] }) {
   const foot = el('footer', 'modal-foot');
   for (const a of actions) {
     const btn = el('button', 'btn ' + (a.cls || 'btn-ghost'), a.label);
+    btn.type = 'button';
     btn.addEventListener('click', async () => {
       if (a.onClick) {
         try { const keep = await a.onClick(); if (keep === false) return; }
@@ -210,6 +218,13 @@ function openModal({ title, body, actions = [] }) {
   if (first) setTimeout(() => first.focus(), 60);
   return { close, box };
 }
+function modalAction(btn, fn) {
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    try { await fn(); } catch (e) { toast(e.message, 'error'); }
+    btn.disabled = false;
+  });
+}
 
 const fmtTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 function fmtDay(ts) {
@@ -221,10 +236,10 @@ function fmtDay(ts) {
   return d.toLocaleDateString([], { weekday: 'long', day: 'numeric', month: 'short' });
 }
 
-/* ---------- text rendering: URLs + @mention pills ---------- */
-const URL_RE = /(https?:\/\/[^\s<>"']+)/g;
-const MENTION_RE = /@([a-zA-Z0-9_]{3,20})/g;
-
+/* =====================================================================
+   TEXT RENDERING — markdown-lite + links + @mention pills
+   All DOM-built (no innerHTML) so it's XSS-safe by construction.
+===================================================================== */
 function userByUsername(name) {
   const n = String(name).toLowerCase();
   const pools = [state.me, ...Object.values(state.authors)];
@@ -238,35 +253,59 @@ function userByUsername(name) {
   for (const u of pools) if (u && u.username && u.username.toLowerCase() === n) return u;
   return null;
 }
-function linkify(text) {
+
+/* url | `code` | @mention (word-bounded) | **bold** | *italic* | ~~strike~~ */
+const INLINE_RE = /(https?:\/\/[^\s<>"']+)|(`[^`\n]+`)|((?:^|\s)@[a-zA-Z0-9_]{3,20}(?![a-zA-Z0-9_]))|(\*\*[^*\n]+\*\*)|(\*[^*\n]+\*)|(~~[^~\n]+~~)/g;
+
+function inlinePass(text) {
   const out = [];
   let last = 0, m;
-  URL_RE.lastIndex = 0;
-  while ((m = URL_RE.exec(text))) {
+  INLINE_RE.lastIndex = 0;
+  while ((m = INLINE_RE.exec(text))) {
     if (m.index > last) out.push(text.slice(last, m.index));
-    const a = el('a', 'msg-link', m[0]);
-    a.href = m[0]; a.target = '_blank'; a.rel = 'noopener noreferrer';
-    out.push(a);
-    last = m.index + m[0].length;
+    const tok = m[0];
+    if (m[1]) {
+      const a = el('a', 'msg-link', tok);
+      a.href = tok; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      out.push(a);
+    } else if (m[2]) {
+      out.push(el('code', 'inline-code', tok.slice(1, -1)));
+    } else if (m[3]) {
+      const lead = tok[0] === '@' ? '' : tok[0];
+      if (lead) out.push(lead);
+      const uname = tok.slice(lead.length + 1);
+      const u = userByUsername(uname);
+      if (u) {
+        out.push(el('span',
+          'mention' + (state.me && u.id === state.me.id ? ' mention-me' : ''),
+          '@' + u.displayName));
+      } else out.push(tok.slice(lead.length));
+    } else if (m[4]) {
+      out.push(el('b', '', tok.slice(2, -2)));
+    } else if (m[5]) {
+      out.push(el('em', '', tok.slice(1, -1)));
+    } else if (m[6]) {
+      out.push(el('s', '', tok.slice(2, -2)));
+    }
+    last = m.index + tok.length;
   }
   if (last < text.length) out.push(text.slice(last));
   return out;
 }
-function renderText(text) {
+function renderRich(text) {
   const frag = document.createDocumentFragment();
-  let idx = 0, m;
-  MENTION_RE.lastIndex = 0;
-  while ((m = MENTION_RE.exec(text))) {
-    if (m.index > idx) frag.append(...linkify(text.slice(idx, m.index)));
-    const u = userByUsername(m[1]);
-    if (u) {
-      frag.append(el('span',
-        'mention' + (state.me && u.id === state.me.id ? ' mention-me' : ''),
-        '@' + u.displayName));
-    } else frag.append(m[0]);
-    idx = m.index + m[0].length;
+  const parts = String(text || '').split('```');
+  for (let i = 0; i < parts.length; i++) {
+    if (i % 2 === 1) {
+      let code = parts[i].replace(/^\n/, '').replace(/\n+$/, '');
+      if (/^[a-zA-Z0-9+#-]{1,10}\n/.test(code)) code = code.replace(/^[a-zA-Z0-9+#-]{1,10}\n/, '');
+      const pre = el('pre', 'code-block');
+      pre.textContent = code || ' ';
+      frag.append(pre);
+    } else if (parts[i]) {
+      frag.append(...inlinePass(parts[i]));
+    }
   }
-  if (idx < text.length) frag.append(...linkify(text.slice(idx)));
   return frag;
 }
 
@@ -277,7 +316,7 @@ let audioCtx = null, lastPingAt = 0;
 function playPing() {
   try {
     const t = Date.now();
-    if (t - lastPingAt < 700) return; // no machine-gun dings
+    if (t - lastPingAt < 700) return;
     lastPingAt = t;
     if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
     if (audioCtx.state === 'suspended') audioCtx.resume();
@@ -298,7 +337,7 @@ function playPing() {
       osc.start(at + off);
       osc.stop(at + off + 0.36);
     });
-  } catch { /* audio not available — ignore */ }
+  } catch { /* audio not available */ }
 }
 
 let lastBadgeKey = '';
@@ -349,6 +388,7 @@ function setAccent(hex) {
   document.documentElement.style.setProperty('--on-accent', pickOnAccent(hex));
   localStorage.setItem(LS.accent, hex);
   markActiveSwatch(hex);
+  updateFaviconBadge(Object.values(state.unread).reduce((a, b) => a + b, 0));
 }
 function setTheme(mode, persist = true) {
   briefThemeAnim();
@@ -357,6 +397,8 @@ function setTheme(mode, persist = true) {
   $$('.seg-btn', $('#themeSeg')).forEach(b => b.classList.toggle('is-active', b.dataset.themeSet === mode));
   railTheme.replaceChildren(icon(mode === 'dark' ? 'sun' : 'moon'));
   railTheme.title = mode === 'dark' ? 'Switch to light' : 'Switch to dark';
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) meta.content = mode === 'dark' ? '#101013' : '#e7e5df';
 }
 function buildSwatches() {
   const cur = localStorage.getItem(LS.accent) || '#ff5c38';
@@ -402,11 +444,6 @@ const dmRoomKey = (a, b) => { const [x, y] = [a, b].sort(); return `dm:${x}:${y}
 const getPeer = (id) => state.friends.friends.find(f => f.id === id) || state.authors[id] || null;
 const authorName = (id) => (state.authors[id] && state.authors[id].displayName) || 'unknown';
 
-/* SCROLLING RULES — no timers, no fighting:
-   • auto-scroll ONLY while within 80px of the bottom
-   • the moment you're farther than 80px up, NOTHING moves the scrollbar
-     again until you scroll back down yourself
-   • images finishing decode late re-glue only if you're at the bottom */
 const isPinned = () => chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight < 80;
 
 function serverInitials(name) {
@@ -416,30 +453,26 @@ function syncOnlineFrom(list) {
   for (const u of list) { if (u.online) state.online.add(u.id); else state.online.delete(u.id); }
 }
 function updateTitle() {
-  // counts ALL unread — the number is always visible in the tab title
   const total = Object.values(state.unread).reduce((a, b) => a + b, 0);
   document.title = (total ? `(${total}) ` : '') + 'Slate';
   updateFaviconBadge(total);
 }
 function renderAll() {
   renderRail(); renderSidebar(); renderChatChrome(); renderMembers();
+  if (!state.route) renderHome();
 }
-
-/* ---------- view mode: ONLY explicit navigation can switch it ----------
-   Background events (presence, friends:sync, reconnects…) can no longer
-   flip the app into home mode — which is what made the composer vanish. */
 function setView(mode) {
   chatSection.classList.toggle('home-mode', mode === 'home');
 }
 
-/* ---------- coalesce event-driven re-renders (max one per 300ms) ---------- */
+/* coalesce event-driven re-renders (max one per 300ms) */
 let renderTimer = null;
 function requestRender() {
   if (renderTimer) return;
   renderTimer = setTimeout(() => {
     renderTimer = null;
     if (document.hidden) return;
-    renderRail(); renderSidebar(); renderChatChrome(); renderMembers();
+    renderAll();
   }, 300);
 }
 document.addEventListener('visibilitychange', () => { if (!document.hidden) requestRender(); });
@@ -447,14 +480,13 @@ document.addEventListener('visibilitychange', () => { if (!document.hidden) requ
 function trimMessagesIfNeeded() {
   if (state.messages.length <= MSG_CAP || !isPinned()) return;
   state.messages = state.messages.slice(-MSG_KEEP);
-  state.hasMore = true; // we just dropped loaded history — older pages exist
+  state.hasMore = true;
   messagesEl.classList.add('no-anim');
   renderHistory({ instant: true });
   requestAnimationFrame(() => messagesEl.classList.remove('no-anim'));
   chatScroll.scrollTop = chatScroll.scrollHeight;
 }
 
-/* ---------- throttle background data refreshes ---------- */
 let lastFriendsFetch = 0, lastServersFetch = 0, lastResyncAt = 0;
 function loadFriendsThrottled() {
   if (Date.now() - lastFriendsFetch < 2000) return;
@@ -471,13 +503,11 @@ function closeDrawers() {
   sidebar.classList.remove('open'); scrimSidebar.classList.remove('show');
   membersPanel.classList.remove('open'); scrimMembers.classList.remove('show');
 }
-function openSidebarDrawer() {
-  sidebar.classList.add('open'); scrimSidebar.classList.add('show');
-}
 function clearComposerExtras() {
   state.replyTo = null; renderReplyBar();
   state.pendingImage = null; renderPendingImage();
   hideMentionPop();
+  closeEmojiPop();
 }
 
 /* =====================================================================
@@ -527,14 +557,14 @@ async function withAuthBusy(btn, errEl, fn) {
   finally { btn.disabled = false; }
 }
 
-/* ---------- latency seismograph (login screen only — STOPS after login) ---------- */
+/* ---------- latency seismograph (login screen only) ---------- */
 const pingHistory = [];
 function startPingMeter() {
   const canvas = $('#pingCanvas');
   if (!canvas) return;
   const ctx = canvas.getContext('2d');
   const loop = async () => {
-    if (authView.hidden) return; // logged in — the meter's job is done
+    if (authView.hidden) return;
     const t0 = performance.now();
     let ms = null, stats = null;
     try {
@@ -600,14 +630,14 @@ function enterApp(user, token) {
   appView.classList.add('entering');
   if (localStorage.getItem(LS.members) !== 'off') appView.classList.add('members-on');
   connectSocket(token);
-  goHome(); // safe default view; navigation takes over once data loads
+  goHome();
   updateTitle();
   api('GET', '/api/features').then(d => {
     state.gifsEnabled = !!d.gifs;
     gifBtn.hidden = !state.gifsEnabled;
   }).catch(() => {});
   Promise.all([loadServers(), loadFriends()]).then(() => {
-    if (state.servers.length) openChannel(state.servers[0].id, state.servers[0].channels[0].id);
+    if (state.servers.length && !state.route) openChannel(state.servers[0].id, state.servers[0].channels[0].id);
   });
 }
 function doLogout(msg) {
@@ -630,7 +660,7 @@ async function loadServers() {
     const s = state.servers.find(x => x.id === state.route.serverId);
     const ch = s && s.channels.find(c => c.id === state.route.channelId);
     if (!ch) {
-      if (s) openChannel(s.id, s.channels[0].id);
+      if (s && s.channels.length) openChannel(s.id, s.channels[0].id);
       else goHome();
       return;
     }
@@ -646,8 +676,6 @@ async function loadFriends() {
     state.friends = d;
     syncOnlineFrom([...d.friends, ...d.incoming, ...d.outgoing]);
   } catch { return; }
-  // peer genuinely gone (unfriended) → leave the DM cleanly, all at once.
-  // Never a silent half-state that hides the composer.
   if (state.route && state.route.type === 'dm' && !getPeer(state.route.userId)) {
     goHome();
     return;
@@ -655,8 +683,7 @@ async function loadFriends() {
   requestRender();
 }
 
-/* reconnects only APPEND messages you actually missed — the DOM (and
-   your scroll position) are never touched if nothing's new */
+/* reconnects only APPEND messages you actually missed */
 async function resync() {
   await Promise.all([loadServers(), loadFriends()]);
   const r = state.route;
@@ -675,7 +702,7 @@ async function resync() {
     }
     const newestAt = state.messages[state.messages.length - 1].createdAt;
     const fresh = d.messages.filter(m => m.createdAt > newestAt);
-    if (!fresh.length) return; // nothing new — DOM untouched, scroll untouched
+    if (!fresh.length) return;
     for (const m of fresh) {
       state.messages.push(m);
       state.typers.delete(m.authorId);
@@ -689,7 +716,6 @@ async function resync() {
 /* =====================================================================
    SOCKET
 ===================================================================== */
-// one malformed event can never wedge the UI — errors are caught & logged
 function safeHandler(fn) {
   return (...args) => {
     try { fn(...args); }
@@ -713,6 +739,8 @@ function connectSocket(token) {
   });
   socket.on('message:new', safeHandler(onNewMessage));
   socket.on('message:delete', safeHandler(onMessageDeleted));
+  socket.on('message:update', safeHandler(onMessageUpdated));
+  socket.on('reaction:update', safeHandler(onReactionUpdate));
   socket.on('mention', safeHandler(onMention));
   socket.on('typing', safeHandler(onTyping));
   socket.on('presence:update', safeHandler(onPresence));
@@ -729,6 +757,7 @@ function onUserUpdate({ user }) {
     state.me = { ...state.me, ...user };
   }
   state.friends.friends = state.friends.friends.map(f => (f.id === user.id ? { ...f, ...user } : f));
+  loadServersThrottled();   // refresh member lists that show this user
   requestRender();
 }
 function onPresence({ userId, online }) {
@@ -737,8 +766,6 @@ function onPresence({ userId, online }) {
   for (const s of state.servers) for (const m of s.members) if (m.id === userId) m.online = online;
   requestRender();
 }
-
-/* mention toasts only when you're NOT already looking at that conversation */
 function onMention(d) {
   if (!d || !d.from) return;
   const r = state.route;
@@ -788,7 +815,6 @@ function messageKeyFor(m) {
   const peer = m.info.userIds.find(id => id !== state.me.id);
   return peer ? 'dm:' + peer : null;
 }
-/* room-based check — works for live AND history messages */
 function isCurrentMessage(m) {
   const r = state.route;
   if (!r || !m || !state.me) return false;
@@ -796,8 +822,6 @@ function isCurrentMessage(m) {
   return m.type === 'dm' && m.room === dmRoomKey(state.me.id, r.userId);
 }
 
-/* a ding ONLY when (a) it's a DM, or (b) you were @mentioned,
-   AND you're not currently viewing that conversation */
 function onNewMessage(m) {
   if (m.author) state.authors[m.authorId] = m.author;
   const key = messageKeyFor(m);
@@ -815,11 +839,16 @@ function onNewMessage(m) {
   if (m.authorId === state.me.id || !key) return;
   state.unread[key] = (state.unread[key] || 0) + 1;
 
-  const isPing = (m.info && m.info.type === 'dm') ||
-    (Array.isArray(m.mentions) && m.mentions.includes(state.me.id));
+  const isDM = !!(m.info && m.info.type === 'dm');
+  const isPing = isDM || (Array.isArray(m.mentions) && m.mentions.includes(state.me.id));
   if (isPing) {
     state.unreadMentions[key] = (state.unreadMentions[key] || 0) + 1;
     playPing();
+    if (isDM) {
+      const from = (m.author && m.author.displayName) || authorName(m.authorId);
+      const snippet = m.text ? m.text.slice(0, 70) : 'sent an image';
+      toast(`${from} · DM — ${snippet}`);
+    }
   }
   requestRender();
   updateTitle();
@@ -832,9 +861,32 @@ function onMessageDeleted(d) {
   if (!current) return;
   const m = state.messages.find(x => x.id === d.id);
   if (!m) return;
-  m.deleted = true; m.text = ''; m.image = null; m.replyTo = null;
-  const node = messagesEl.querySelector(`[data-id="${d.id}"]`);
-  if (node) node.replaceWith(messageNode(m, { noAnim: true }));
+  m.deleted = true; m.text = ''; m.image = null; m.replyTo = null; m.reactions = {};
+  replaceMessageNode(m);
+}
+function onMessageUpdated(d) {
+  const r = state.route;
+  if (!r || !d || !state.me) return;
+  const current = (r.type === 'channel' && d.type === 'channel' && d.room === r.channelId) ||
+                  (r.type === 'dm' && d.type === 'dm' && d.room === dmRoomKey(state.me.id, r.userId));
+  if (!current) return;
+  const m = state.messages.find(x => x.id === d.id);
+  if (!m || m.deleted) return;
+  m.text = d.text;
+  m.editedAt = d.editedAt;
+  m.mentions = d.mentions || [];
+  replaceMessageNode(m);
+}
+function onReactionUpdate(d) {
+  const r = state.route;
+  if (!r || !d || !state.me) return;
+  const current = (r.type === 'channel' && d.type === 'channel' && d.room === r.channelId) ||
+                  (r.type === 'dm' && d.type === 'dm' && d.room === dmRoomKey(state.me.id, r.userId));
+  if (!current) return;
+  const m = state.messages.find(x => x.id === d.id);
+  if (!m || m.deleted) return;
+  m.reactions = d.reactions || {};
+  replaceMessageNode(m);
 }
 
 const isCompact = (prev, m) =>
@@ -883,17 +935,22 @@ function messageNode(m, opts = {}) {
   }
 
   const text = el('div', 'msg-text');
-  text.append(renderText(m.text || ''));
+  text.append(renderRich(m.text || ''));
+  if (m.authorId === state.me.id) {
+    text.addEventListener('dblclick', () => startEdit(m));
+  }
 
   if (compactRow) {
     row.append(el('span', 'msg-spacer'), body);
     body.append(text);
-    row.append(el('span', 'msg-time msg-time-compact mono', fmtTime(m.createdAt)));
+    row.append(el('span', 'msg-time msg-time-compact mono',
+      fmtTime(m.createdAt) + (m.editedAt ? ' · EDITED' : '')));
   } else {
     row.append(avatarEl(state.authors[m.authorId] || { id: m.authorId, username: '?' }, { size: 34 }));
     const head = el('div', 'msg-head');
     head.append(el('span', 'msg-name', authorName(m.authorId)));
     head.append(el('span', 'msg-time mono', fmtTime(m.createdAt)));
+    if (m.editedAt) head.append(el('span', 'msg-edited mono', 'EDITED'));
     body.append(head, text);
     row.append(body);
   }
@@ -906,17 +963,30 @@ function messageNode(m, opts = {}) {
       img.replaceWith(fb);
     });
     img.addEventListener('click', () => openLightbox(m.image));
-    // late-decoding image: re-glue ONLY if you're at the bottom
     img.addEventListener('load', () => {
       if (isPinned()) chatScroll.scrollTop = chatScroll.scrollHeight;
     });
     body.append(img);
   }
 
+  const rrow = reactionsRow(m);
+  if (rrow) body.append(rrow);
+
   const acts = el('div', 'msg-actions');
   const replyBtn = iconBtn('reply', 'act-btn', 'Reply');
   replyBtn.addEventListener('click', () => startReply(m));
   acts.append(replyBtn);
+  const reactBtn = iconBtn('smile', 'act-btn', 'Add reaction');
+  reactBtn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openEmojiPop(reactBtn, (em) => toggleReaction(m, em));
+  });
+  acts.append(reactBtn);
+  if (m.authorId === state.me.id) {
+    const editBtn = iconBtn('edit', 'act-btn', 'Edit');
+    editBtn.addEventListener('click', () => startEdit(m));
+    acts.append(editBtn);
+  }
   if (canDeleteMessage(m)) {
     const delBtn = iconBtn('trash', 'act-btn icon-btn-danger', 'Delete message');
     delBtn.addEventListener('click', () => confirmDeleteMessage(m));
@@ -936,6 +1006,90 @@ function safeMessageNode(m, opts) {
     return row;
   }
 }
+function replaceMessageNode(m) {
+  const node = messagesEl.querySelector(`[data-id="${m.id}"]`);
+  if (!node) return;
+  const i = state.messages.indexOf(m);
+  const prev = i > 0 ? state.messages[i - 1] : null;
+  node.replaceWith(safeMessageNode(m, { compact: isCompact(prev, m), noAnim: true }));
+}
+
+/* ---------- reactions ---------- */
+function reactionsRow(m) {
+  const rx = m.reactions || {};
+  const chips = [];
+  for (const emoji of Object.keys(rx)) {
+    const list = rx[emoji] || [];
+    if (!list.length) continue;
+    const chip = el('button', 'reaction' + (list.includes(state.me.id) ? ' is-mine' : ''));
+    chip.type = 'button';
+    chip.title = list.length + (list.length === 1 ? ' reaction' : ' reactions');
+    chip.append(el('span', 'r-emoji', emoji), el('span', 'r-count mono', String(list.length)));
+    chip.addEventListener('click', () => toggleReaction(m, emoji));
+    chips.push(chip);
+  }
+  if (!chips.length) return null;
+  const rowEl = el('div', 'reactions');
+  for (const c of chips) rowEl.append(c);
+  const add = el('button', 'reaction reaction-add');
+  add.type = 'button';
+  add.title = 'Add reaction';
+  add.append(el('span', 'r-emoji', '+'));
+  add.addEventListener('click', (e) => {
+    e.stopPropagation();
+    openEmojiPop(add, (em) => toggleReaction(m, em));
+  });
+  rowEl.append(add);
+  return rowEl;
+}
+function toggleReaction(m, emoji) {
+  if (!state.socket || m.deleted) return;
+  m.reactions = m.reactions || {};
+  const list = m.reactions[emoji] || [];
+  if (list.includes(state.me.id)) {
+    const next = list.filter(id => id !== state.me.id);
+    if (next.length) m.reactions[emoji] = next; else delete m.reactions[emoji];
+  } else {
+    m.reactions[emoji] = [...list, state.me.id];
+  }
+  replaceMessageNode(m);
+  state.socket.emit('reaction:toggle', { messageId: m.id, emoji });
+}
+
+/* ---------- inline editing ---------- */
+function startEdit(m) {
+  const node = messagesEl.querySelector(`[data-id="${m.id}"]`);
+  if (!node || m.deleted) return;
+  const textEl = node.querySelector('.msg-text');
+  if (!textEl) return;
+  const ta = el('textarea', 'edit-input');
+  ta.value = m.text || '';
+  ta.maxLength = 2000;
+  textEl.replaceWith(ta);
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(ta.scrollHeight, 200) + 'px';
+  ta.focus();
+  ta.setSelectionRange(ta.value.length, ta.value.length);
+  let done = false;
+  const finish = (save) => {
+    if (done) return;
+    done = true;
+    const v = ta.value.trim();
+    if (save && v !== (m.text || '') && (v || m.image) && state.socket) {
+      m.text = v;
+      m.editedAt = Date.now();
+      state.socket.emit('message:edit', { id: m.id, text: v }, (ack) => {
+        if (ack && !ack.ok) toast('Edit failed', 'error');
+      });
+    }
+    replaceMessageNode(m);
+  };
+  ta.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); finish(true); }
+    else if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); finish(false); }
+  });
+  ta.addEventListener('blur', () => finish(false));
+}
 
 function startReply(m) {
   state.replyTo = m;
@@ -943,7 +1097,8 @@ function startReply(m) {
   composerInput.focus();
 }
 function renderReplyBar() {
-  if (!state.replyTo) { replyBar.hidden = true; return; }
+  if (!state.replyTo) { replyBar.hidden = true; replyIconSlot.replaceChildren(); return; }
+  replyIconSlot.replaceChildren(icon('reply', 'mini-icon'));
   replyInfo.replaceChildren();
   replyInfo.append(el('span', 'replying-to', 'Replying to '));
   replyInfo.append(el('span', 'replying-name', authorName(state.replyTo.authorId)));
@@ -974,6 +1129,7 @@ function renderHistory(opts = {}) {
   if (!list.length) return;
   if (state.hasMore) {
     const b = el('button', 'older-btn mono', 'LOAD OLDER');
+    b.type = 'button';
     b.addEventListener('click', loadOlderMessages);
     messagesEl.append(b);
   }
@@ -999,6 +1155,7 @@ function renderMessageAppend(m) {
   if (dayChanged(prev, m)) messagesEl.append(el('div', 'day-div', fmtDay(m.createdAt)));
   messagesEl.append(safeMessageNode(m, { compact: isCompact(prev, m) }));
   chatEmpty.hidden = true;
+  jumpBtn.classList.toggle('show', !isPinned());
 }
 async function loadOlderMessages() {
   const first = state.messages[0];
@@ -1009,7 +1166,6 @@ async function loadOlderMessages() {
   try {
     const d = await api('GET', base + '?before=' + first.createdAt);
     if (state.route !== r) return;
-    // end of history → just remove the button, never rebuild the view
     if (!d.messages.length) {
       state.hasMore = false;
       const btn = messagesEl.querySelector('.older-btn');
@@ -1023,7 +1179,6 @@ async function loadOlderMessages() {
     renderHistory({ instant: true, preserveScroll: true });
     requestAnimationFrame(() => messagesEl.classList.remove('no-anim'));
 
-    // anchor the view to the message that used to be at the very top
     const anchor = () => {
       const node = messagesEl.querySelector(`[data-id="${first.id}"]`);
       if (!node) return;
@@ -1040,7 +1195,7 @@ async function loadOlderMessages() {
 }
 
 /* =====================================================================
-   ROUTING (the ONLY place the view mode ever changes)
+   ROUTING
 ===================================================================== */
 function openChannel(serverId, channelId) {
   state.sidebarMode = serverId;
@@ -1084,6 +1239,7 @@ async function openRoom() {
   composerBox.classList.remove('disabled');
   renderSidebar(); renderRail(); renderMembers(); renderChatChrome();
   closeDrawers();
+  jumpBtn.classList.remove('show');
   messagesEl.replaceChildren();
   state.messages = [];
   state.hasMore = false;
@@ -1118,6 +1274,7 @@ function renderRail() {
   railFriends.classList.toggle('is-active', !state.route);
   railServers.replaceChildren(...state.servers.map(s => {
     const b = el('button', 'rail-server' + (state.sidebarMode === s.id ? ' is-active' : ''));
+    b.type = 'button';
     b.title = s.name + (s.official ? ' · official' : '');
     if (s.icon) {
       const img = el('img'); img.src = s.icon; img.alt = s.name; img.decoding = 'async';
@@ -1133,8 +1290,11 @@ function renderRail() {
     return b;
   }));
   const pending = state.friends.incoming.length;
-  const fb = railFriends.querySelector('.rail-badge');
-  if (fb) { fb.textContent = pending > 9 ? '9+' : String(pending); fb.hidden = !pending; }
+  let fb = railFriends.querySelector('.rail-badge');
+  if (pending) {
+    if (!fb) { fb = el('span', 'rail-badge mono'); railFriends.append(fb); }
+    fb.textContent = pending > 9 ? '9+' : String(pending);
+  } else if (fb) fb.remove();
 }
 
 /* =====================================================================
@@ -1162,6 +1322,7 @@ function renderDmSidebar() {
   sidebarBody.append(head);
 
   const find = el('button', 'side-row side-add');
+  find.type = 'button';
   find.append(icon('search', 'row-icon'), el('span', 'row-label', 'Find friends'));
   find.addEventListener('click', () => goHome('add'));
   sidebarBody.append(find);
@@ -1176,6 +1337,7 @@ function renderDmSidebar() {
   for (const u of sorted) {
     const active = state.route && state.route.type === 'dm' && state.route.userId === u.id;
     const row = el('button', 'side-row side-dm' + (active ? ' is-active' : ''));
+    row.type = 'button';
     row.append(avatarEl(u, { size: 30, showPresence: true, online: u.online }));
     row.append(el('span', 'row-label', u.displayName));
     const un = state.unread['dm:' + u.id] || 0;
@@ -1198,9 +1360,11 @@ function renderServerSidebar(s) {
   }
   sidebarBody.append(head);
 
+  sidebarBody.append(el('div', 'side-label', 'CHANNELS'));
   for (const c of s.channels) {
     const active = state.route && state.route.type === 'channel' && state.route.channelId === c.id;
     const row = el('button', 'side-row side-channel' + (active ? ' is-active' : ''));
+    row.type = 'button';
     row.append(icon('hash', 'row-icon'));
     row.append(el('span', 'row-label', c.name));
     const u = state.unread['c:' + c.id] || 0;
@@ -1213,6 +1377,7 @@ function renderServerSidebar(s) {
 
   if (isOwner) {
     const addCh = el('button', 'side-row side-add');
+    addCh.type = 'button';
     addCh.append(icon('plus', 'row-icon'), el('span', 'row-label', 'New channel'));
     addCh.addEventListener('click', openNewChannelModal);
     sidebarBody.append(addCh);
@@ -1231,6 +1396,7 @@ function renderServerSidebar(s) {
 
   if (!s.official) {
     const leave = el('button', 'link-danger mono', 'LEAVE SERVER');
+    leave.type = 'button';
     leave.addEventListener('click', () => confirmLeaveServer(s));
     sidebarBody.append(leave);
   }
@@ -1261,7 +1427,6 @@ function renderHomeTabs() {
     return b;
   }));
 }
-
 function renderHome() {
   const keepScroll = homeBody.scrollTop;
   buildHome();
@@ -1294,801 +1459,1031 @@ function buildHome() {
     return;
   }
   homeBody.append(el('div', 'side-label',
-    (state.homeTab === 'online' ? 'ONLINE' : 'ALL FRIENDS') + ' — ' + list.length));
-  list.forEach(u => homeBody.append(friendRow(u, 'friend')));
+    (state.homeTab === 'online' ? 'ONLINE — ' : 'ALL FRIENDS — ') + list.length));
+  const sorted = [...list].sort((a, b) =>
+    (b.online - a.online) || a.displayName.localeCompare(b.displayName));
+  for (const u of sorted) homeBody.append(friendRow(u, 'friend'));
 }
+
 function friendRow(u, kind) {
   const row = el('div', 'friend-row');
-  row.append(avatarEl(u, { size: 40, showPresence: true, online: u.online }));
+  row.append(avatarEl(u, { size: 38, showPresence: true, online: u.online }));
   row.append(personMain(u));
+  const acts = el('div', 'friend-actions');
   if (kind === 'friend') {
-    row.addEventListener('click', () => openDm(u.id));
     const msg = iconBtn('message', '', 'Message');
     msg.addEventListener('click', (e) => { e.stopPropagation(); openDm(u.id); });
-    const rm = iconBtn('trash', 'icon-btn-danger', 'Remove friend');
-    rm.addEventListener('click', (e) => { e.stopPropagation(); confirmRemoveFriend(u); });
-    row.append(msg, rm);
+    const rem = iconBtn('trash', 'icon-btn-danger', 'Remove friend');
+    rem.addEventListener('click', (e) => { e.stopPropagation(); confirmRemoveFriend(u); });
+    acts.append(msg, rem);
   } else if (kind === 'incoming') {
-    const yes = iconBtn('check', '', 'Accept');
-    yes.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      try { await api('POST', '/api/friends/accept', { userId: u.id }); toast('You are now friends', 'success'); loadFriends(); }
-      catch (err) { toast(err.message, 'error'); }
-    });
+    const ok = iconBtn('check', '', 'Accept');
+    ok.addEventListener('click', (e) => { e.stopPropagation(); friendAction(u, 'accept'); });
     const no = iconBtn('x', 'icon-btn-danger', 'Decline');
-    no.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      try { await api('POST', '/api/friends/decline', { userId: u.id }); loadFriends(); }
-      catch (err) { toast(err.message, 'error'); }
-    });
-    row.append(yes, no);
-  } else if (kind === 'outgoing') {
-    row.append(el('span', 'state-tag mono', 'PENDING'));
-    const cancel = iconBtn('x', 'icon-btn-danger', 'Cancel request');
-    cancel.addEventListener('click', async (e) => {
-      e.stopPropagation();
-      try { await api('POST', '/api/friends/cancel', { userId: u.id }); loadFriends(); }
-      catch (err) { toast(err.message, 'error'); }
-    });
-    row.append(cancel);
+    no.addEventListener('click', (e) => { e.stopPropagation(); friendAction(u, 'decline'); });
+    acts.append(ok, no);
+  } else {
+    const no = iconBtn('x', 'icon-btn-danger', 'Cancel request');
+    no.addEventListener('click', (e) => { e.stopPropagation(); friendAction(u, 'cancel'); });
+    acts.append(no);
   }
+  row.append(acts);
+  if (kind === 'friend') row.addEventListener('click', () => openDm(u.id));
   return row;
 }
-function confirmRemoveFriend(u) {
-  openModal({
-    title: 'Remove friend',
-    body: `Remove ${u.displayName} from your friends? The message history stays on the server.`,
-    actions: [
-      { label: 'Cancel' },
-      { label: 'Remove', cls: 'btn-danger', onClick: async () => {
-        await api('POST', '/api/friends/remove', { userId: u.id });
-        toast('Friend removed');
-        loadFriends();
-      } }
-    ]
-  });
-}
 
-/* ---------- Add Friend tab — search box survives re-renders ---------- */
-let addFriendDeb = null, addFriendSeq = 0;
 function renderAddFriend() {
-  const prev = $('.add-friend-input');
-  const wasFocused = !!prev && document.activeElement === prev;
-  const caret = prev ? prev.selectionStart : 0;
-
   const wrap = el('div', 'add-friend');
   const box = el('div', 'add-friend-box');
   box.append(icon('search'));
-  const inp = el('input', 'add-friend-input');
-  inp.placeholder = 'Type a username or display name…';
-  inp.spellcheck = false;
-  inp.value = state.addFriendQ;
-  box.append(inp);
-  const status = el('p', 'add-friend-status mono');
+  const input = el('input', 'add-friend-input');
+  input.placeholder = 'Search people by username or display name';
+  input.spellcheck = false;
+  input.value = state.addFriendQ;
+  box.append(input);
+  const status = el('p', 'add-friend-status mono', '');
   const results = el('div', 'add-friend-results');
   wrap.append(box, status, results);
   homeBody.append(wrap);
 
-  if (wasFocused) {
-    inp.focus();
-    try { inp.setSelectionRange(caret, caret); } catch { /* ignore */ }
-  }
-
-  if (state.addFriendResults) updateAddFriendResults();
-  else { status.textContent = 'SEARCH FOR SOMEONE BY USERNAME OR DISPLAY NAME'; status.hidden = false; }
-
-  inp.addEventListener('input', () => {
-    state.addFriendQ = inp.value;
-    clearTimeout(addFriendDeb);
-    const q = inp.value.trim();
-    if (q.length < 2) {
-      addFriendSeq++;
-      state.addFriendResults = null;
-      results.replaceChildren();
-      status.textContent = 'KEEP TYPING — AT LEAST 2 CHARACTERS';
-      status.hidden = false;
-      return;
-    }
+  let deb = null;
+  const searchUsers = async () => {
+    const q = state.addFriendQ.trim();
+    if (q.length < 2) { state.addFriendResults = null; status.textContent = ''; results.replaceChildren(); return; }
     status.textContent = 'SEARCHING…';
-    status.hidden = false;
-    addFriendDeb = setTimeout(() => runAddFriendSearch(q), 300);
+    try {
+      const d = await api('GET', '/api/users/search?q=' + encodeURIComponent(q));
+      state.addFriendResults = d.results;
+      renderAddFriendResults(results, status, q);
+    } catch (e) { status.textContent = e.message.toUpperCase(); }
+  };
+  input.addEventListener('input', () => {
+    state.addFriendQ = input.value;
+    clearTimeout(deb);
+    deb = setTimeout(searchUsers, 300);
   });
+  if (state.addFriendResults) renderAddFriendResults(results, status, state.addFriendQ);
+  else if (state.addFriendQ.trim().length >= 2) searchUsers();
+  else status.textContent = 'SEARCH BY USERNAME OR NAME — 2+ CHARACTERS';
+  setTimeout(() => { if (!homeBody.contains(document.activeElement)) input.focus(); }, 40);
 }
-function runAddFriendSearch(q) {
-  const mySeq = ++addFriendSeq;
-  api('GET', '/api/users/search?q=' + encodeURIComponent(q)).then(d => {
-    if (mySeq !== addFriendSeq) return;
-    state.addFriendResults = d.results;
-    updateAddFriendResults();
-  }).catch(e => {
-    if (mySeq !== addFriendSeq) return;
-    const status = $('.add-friend-status');
-    if (status) { status.textContent = e.message.toUpperCase(); status.hidden = false; }
-  });
-}
-function updateAddFriendResults() {
-  const results = $('.add-friend-results');
-  const status = $('.add-friend-status');
-  if (!results || !status) return;
+function renderAddFriendResults(results, status, q) {
+  results.replaceChildren();
   const list = state.addFriendResults;
-  if (!list) { results.replaceChildren(); return; }
-  if (!list.length) {
-    results.replaceChildren();
-    status.textContent = 'NO RESULTS — CHECK THE SPELLING?';
-    status.hidden = false;
-    return;
+  if (!list) return;
+  status.textContent = list.length
+    ? `${list.length} RESULT${list.length === 1 ? '' : 'S'}`
+    : 'NO MATCHES FOR “' + String(q).toUpperCase() + '”';
+  for (const u of list) results.append(personRow(u));
+}
+function personRow(u) {
+  const row = el('div', 'person-row');
+  row.append(avatarEl(u, { size: 34, showPresence: true, online: u.online }));
+  row.append(personMain(u));
+  const rel = u.state || friendRelation(u.id);
+  if (rel === 'friend') {
+    row.append(el('span', 'state-tag tag-accent mono', 'FRIENDS'));
+  } else if (rel === 'outgoing') {
+    row.append(el('span', 'state-tag mono', 'PENDING'));
+  } else {
+    const b = el('button', 'btn btn-sm ' + (rel === 'incoming' ? 'btn-accent' : 'btn-ghost'),
+      rel === 'incoming' ? 'Accept' : 'Add');
+    b.type = 'button';
+    b.addEventListener('click', (e) => {
+      e.stopPropagation();
+      friendAction(u, rel === 'incoming' ? 'accept' : 'request');
+    });
+    row.append(b);
   }
-  status.hidden = true;
-  results.replaceChildren(...list.map(u => {
-    state.authors[u.id] = u;
-    const row = el('div', 'person-row');
-    row.append(avatarEl(u, { size: 32, showPresence: true, online: u.online }));
-    row.append(personMain(u));
-    if (u.state === 'friend') row.append(el('span', 'state-tag mono', 'FRIENDS'));
-    else if (u.state === 'outgoing') row.append(el('span', 'state-tag mono', 'SENT'));
-    else if (u.state === 'incoming') row.append(el('span', 'state-tag mono tag-accent', 'WANTS TO ADD YOU'));
-    else {
-      const add = iconBtn('user-plus', '', 'Send friend request');
-      add.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        try {
-          await api('POST', '/api/friends/request', { userId: u.id });
-          toast('Request sent', 'success');
-          row.querySelector('.icon-btn').replaceWith(el('span', 'state-tag mono', 'SENT'));
-        } catch (err) { toast(err.message, 'error'); }
-      });
-      row.append(add);
-    }
-    return row;
-  }));
+  row.addEventListener('click', () => openProfileModal(u));
+  return row;
+}
+
+/* ---------- friends actions ---------- */
+function friendRelation(id) {
+  const f = state.friends;
+  if (f.friends.some(u => u.id === id)) return 'friend';
+  if (f.incoming.some(u => u.id === id)) return 'incoming';
+  if (f.outgoing.some(u => u.id === id)) return 'outgoing';
+  return 'none';
+}
+const FRIEND_MSG = {
+  request: u => `Friend request sent to ${u.displayName}`,
+  accept:  u => `You and ${u.displayName} are now friends`,
+  decline: () => 'Request declined',
+  cancel:  () => 'Request cancelled',
+  remove:  u => `${u.displayName} was removed from your friends`
+};
+async function friendAction(u, action) {
+  try {
+    await api('POST', '/api/friends/' + action, { userId: u.id });
+    state.addFriendResults = null;
+    await loadFriends();
+    toast((FRIEND_MSG[action] || (() => 'Done'))(u), 'success');
+    renderRail(); renderChatChrome();
+    if (!state.route) renderHome();
+  } catch (e) { toast(e.message, 'error'); }
+}
+function confirmRemoveFriend(p) {
+  openModal({
+    title: 'Remove friend',
+    body: `This removes ${p.displayName} from your friends. You can add each other again later.`,
+    actions: [
+      { label: 'Cancel' },
+      { label: 'Remove', cls: 'btn-danger', onClick: () => friendAction(p, 'remove') }
+    ]
+  });
 }
 
 /* =====================================================================
-   RENDER: CHAT CHROME (display only — never switches the view mode)
+   CHAT CHROME + MEMBERS PANEL
 ===================================================================== */
 function renderChatChrome() {
+  if (!state.me) return;
   const r = state.route;
   chatTitle.replaceChildren();
+  membersToggle.replaceChildren(icon('users'));
 
   if (!r) {
-    chatTitle.append(el('span', '', 'Friends'));
-    const online = state.friends.friends.filter(f => f.online).length;
-    chatMeta.textContent = state.friends.friends.length ? `${online} / ${state.friends.friends.length} ONLINE` : '';
-    composerBox.classList.add('disabled');
-    composerInput.placeholder = 'Message…';
+    chatTitle.append(icon('users', 'title-hash'), el('span', '', 'Friends'));
+    const online = state.friends.friends.filter(x => x.online).length;
+    chatMeta.textContent = `${state.friends.friends.length} FRIENDS · ${online} ONLINE`;
     renderHomeTabs();
-    renderHome();
+    composerInput.placeholder = 'Message…';
+    membersToggle.title = 'Active now';
     return;
   }
-  composerBox.classList.remove('disabled');
-
   if (r.type === 'channel') {
     const s = state.servers.find(x => x.id === r.serverId);
     const ch = s && s.channels.find(c => c.id === r.channelId);
-    const name = ch ? ch.name : 'channel';
-    chatTitle.append(icon('hash', 'title-hash'), el('span', '', name));
-    if (s) chatMeta.textContent = `${s.members.length} MEMBERS · ${s.members.filter(m => m.online).length} ONLINE`;
-    composerInput.placeholder = `Message #${name} — @ to mention`;
-  } else {
-    const peer = getPeer(r.userId);
-    if (!peer) {
-      chatTitle.append(el('span', '', '—'));
-      chatMeta.textContent = '';
-      return;
-    }
-    chatTitle.append(avatarEl(peer, { size: 22 }), el('span', '', peer.displayName));
-    chatMeta.textContent = `@${peer.username.toUpperCase()} · ${state.online.has(peer.id) ? 'ONLINE' : 'OFFLINE'}`;
-    composerInput.placeholder = `Message ${peer.displayName} — @ to mention`;
+    chatTitle.append(icon('hash', 'title-hash'), el('span', '', (ch && ch.name) || 'channel'));
+    chatMeta.textContent = s ? `${s.name.toUpperCase()} · ${s.members.length} MEMBERS` : '';
+    composerInput.placeholder = ch ? `Message #${ch.name}` : 'Message…';
+    membersToggle.title = 'Toggle members';
+    return;
   }
+  const p = getPeer(r.userId);
+  if (p) {
+    const online = state.online.has(p.id);
+    chatTitle.append(avatarEl(p, { size: 22, showPresence: true, online }), el('span', '', p.displayName));
+    chatMeta.textContent = '@' + p.username.toUpperCase() + ' · ' + (online ? 'ONLINE' : 'OFFLINE');
+    composerInput.placeholder = 'Message @' + p.username;
+  }
+  membersToggle.title = 'Toggle profile';
 }
 
-/* =====================================================================
-   RENDER: MEMBERS / ACTIVE NOW
-===================================================================== */
 function renderMembers() {
+  if (!state.me) return;
   const r = state.route;
   membersBody.replaceChildren();
+
   if (!r) {
     membersHead.textContent = 'ACTIVE NOW';
     const online = state.friends.friends.filter(f => f.online);
     if (!online.length) {
-      const card = el('div', 'quiet-card');
-      card.append(el('div', 'quiet-title', 'It’s quiet for now…'));
-      card.append(el('p', 'quiet-sub', 'When friends come online, they’ll show up here so you can jump straight into a conversation.'));
-      membersBody.append(card);
+      const c = el('div', 'quiet-card');
+      c.append(el('p', 'quiet-title', 'All quiet'));
+      c.append(el('p', 'quiet-sub', 'Friends will show up here when they come online.'));
+      membersBody.append(c);
       return;
     }
+    membersBody.append(el('div', 'side-label', 'ONLINE — ' + online.length));
     for (const u of online) {
-      const row = el('div', 'active-row');
-      row.append(avatarEl(u, { size: 32, showPresence: true, online: true }));
-      const main = el('div', 'person-main');
-      main.append(el('div', 'person-name', u.displayName));
-      main.append(el('div', 'person-user mono', 'ONLINE'));
-      row.append(main);
+      const row = el('button', 'active-row');
+      row.type = 'button';
+      row.append(avatarEl(u, { size: 30, showPresence: true, online: true }));
+      row.append(el('span', 'member-name', u.displayName));
       row.addEventListener('click', () => openDm(u.id));
       membersBody.append(row);
     }
     return;
   }
-  if (r.type === 'channel') {
-    membersHead.textContent = 'MEMBERS';
-    const s = state.servers.find(x => x.id === r.serverId);
-    if (!s) return;
-    const on = s.members.filter(m => m.online);
-    const off = s.members.filter(m => !m.online);
-    const group = (label, arr, dim) => {
-      if (!arr.length) return;
-      membersBody.append(el('div', 'side-label', label));
-      for (const m of arr) {
-        state.authors[m.id] = m;
-        const row = el('div', 'member-row' + (dim ? ' off' : ''));
-        row.append(avatarEl(m, { size: 30, showPresence: !dim, online: m.online }));
-        row.append(el('span', 'member-name', m.displayName + (m.id === state.me.id ? ' (you)' : '')));
-        if (m.id === s.ownerId) row.append(el('span', 'member-tag mono', 'OWNER'));
-        membersBody.append(row);
-      }
-    };
-    group(`ONLINE — ${on.length}`, on, false);
-    group(`OFFLINE — ${off.length}`, off, true);
-  } else {
+
+  if (r.type === 'dm') {
     membersHead.textContent = 'PROFILE';
-    const peer = getPeer(r.userId);
-    if (!peer) return;
+    const p = getPeer(r.userId);
+    if (!p) return;
     const card = el('div', 'peer-card');
-    card.append(avatarEl(peer, { size: 64, showPresence: true, online: state.online.has(peer.id) }));
-    card.append(el('div', 'peer-name', peer.displayName));
-    card.append(el('div', 'peer-user mono', '@' + peer.username));
-    if (peer.bio) card.append(el('p', 'peer-bio', peer.bio));
-    card.append(el('div', 'peer-status mono', state.online.has(peer.id) ? '● ONLINE' : '○ OFFLINE'));
-    const rm = el('button', 'btn btn-danger btn-sm', 'Remove friend');
-    rm.addEventListener('click', () => confirmRemoveFriend(peer));
-    card.append(rm);
+    card.append(avatarEl(p, { size: 76, showPresence: true, online: state.online.has(p.id) }));
+    card.append(el('div', 'peer-name', p.displayName));
+    card.append(el('div', 'peer-user mono', '@' + p.username));
+    if (p.bio) card.append(el('p', 'peer-bio', p.bio));
+    card.append(el('div', 'peer-status mono', state.online.has(p.id) ? 'ONLINE' : 'OFFLINE'));
+    const btn = el('button', 'btn btn-danger btn-sm', 'Remove friend');
+    btn.type = 'button';
+    btn.addEventListener('click', () => confirmRemoveFriend(p));
+    card.append(btn);
     membersBody.append(card);
+    return;
+  }
+
+  const s = state.servers.find(x => x.id === r.serverId);
+  if (!s) return;
+  membersHead.textContent = `MEMBERS — ${s.members.length}`;
+  const online = s.members.filter(m => state.online.has(m.id) || m.online);
+  const offline = s.members.filter(m => !(state.online.has(m.id) || m.online));
+  const rowFor = (m) => {
+    const row = el('button', 'member-row' + (!(state.online.has(m.id) || m.online) ? ' off' : ''));
+    row.type = 'button';
+    row.append(avatarEl(m, { size: 30, showPresence: true, online: state.online.has(m.id) || m.online }));
+    row.append(el('span', 'member-name', m.displayName));
+    if (s.ownerId === m.id) row.append(el('span', 'member-tag mono', 'OWNER'));
+    row.addEventListener('click', () => openProfileModal(m));
+    return row;
+  };
+  if (online.length) {
+    membersBody.append(el('div', 'side-label', 'ONLINE — ' + online.length));
+    online.forEach(m => membersBody.append(rowFor(m)));
+  }
+  if (offline.length) {
+    membersBody.append(el('div', 'side-label', 'OFFLINE — ' + offline.length));
+    offline.forEach(m => membersBody.append(rowFor(m)));
   }
 }
 
-/* =====================================================================
-   COMPOSER
-===================================================================== */
-function autosize() {
-  composerInput.style.height = 'auto';
-  composerInput.style.height = Math.min(composerInput.scrollHeight, 140) + 'px';
+function openProfileModal(u) {
+  const body = el('div', 'peer-card');
+  body.append(avatarEl(u, { size: 72, showPresence: true, online: state.online.has(u.id) }));
+  body.append(el('div', 'peer-name', u.displayName));
+  body.append(el('div', 'peer-user mono', '@' + u.username));
+  if (u.bio) body.append(el('p', 'peer-bio', u.bio));
+  body.append(el('div', 'peer-status mono', state.online.has(u.id) ? 'ONLINE' : 'OFFLINE'));
+  const rel = friendRelation(u.id);
+  const actions = [];
+  if (rel === 'friend') actions.push({ label: 'Message', cls: 'btn-accent', onClick: () => { openDm(u.id); } });
+  else if (rel === 'none') actions.push({ label: 'Add friend', cls: 'btn-accent', onClick: () => friendAction(u, 'request') });
+  else if (rel === 'incoming') actions.push({ label: 'Accept request', cls: 'btn-accent', onClick: () => friendAction(u, 'accept') });
+  openModal({ title: 'Profile', body, actions });
 }
-let typingSent = false, typingTimer = null;
+
+/* =====================================================================
+   COMPOSER — typing, mentions, sending, images
+===================================================================== */
+function autosize() { autosizeEl(composerInput); }
+function autosizeEl(ta) {
+  ta.style.height = 'auto';
+  ta.style.height = Math.min(ta.scrollHeight, 140) + 'px';
+}
+
+let typingSentAt = 0, typingStopTimer = null;
+function queueTyping() {
+  if (!state.route || !state.socket) return;
+  if (Date.now() - typingSentAt > 2000) {
+    typingSentAt = Date.now();
+    emitTyping(true);
+  }
+  clearTimeout(typingStopTimer);
+  typingStopTimer = setTimeout(() => { typingSentAt = 0; emitTyping(false); }, 1600);
+}
 function emitTyping(isTyping) {
   const r = state.route;
   if (!r || !state.socket) return;
   state.socket.emit('typing', {
-    roomType: r.type === 'channel' ? 'channel' : 'dm',
+    roomType: r.type,
     target: r.type === 'channel' ? r.channelId : r.userId,
-    isTyping
+    isTyping: !!isTyping
   });
 }
 
-/* ---------- mention autocomplete ---------- */
-function mentionCandidates(token) {
+let lastSendAt = 0;
+function sendMessage() {
   const r = state.route;
-  if (!r) return [];
-  let pool = [];
+  if (!r || !state.socket) return;
+  const text = composerInput.value.trim();
+  const image = state.pendingImage;
+  if (!text && !image) return;
+  if (Date.now() - lastSendAt < 150) return;
+  const reply = state.replyTo;
+  lastSendAt = Date.now();
+
+  state.socket.emit('message:send', {
+    roomType: r.type,
+    target: r.type === 'channel' ? r.channelId : r.userId,
+    text,
+    image: image || null,
+    replyTo: reply ? reply.id : null
+  }, (ack) => {
+    if (!ack || !ack.ok) {
+      /* put the message back so the user never loses their text */
+      composerInput.value = text;
+      autosize();
+      if (image) { state.pendingImage = image; renderPendingImage(); }
+      if (reply) { state.replyTo = reply; renderReplyBar(); }
+      if (!ack || ack.reason !== 'rate') toast('Message didn’t send — try again', 'error');
+    }
+  });
+
+  composerInput.value = '';
+  autosize();
+  clearComposerExtras();
+  clearTimeout(typingStopTimer);
+  typingSentAt = 0;
+  emitTyping(false);
+}
+
+/* ---------- @mention popup ---------- */
+function mentionCandidates() {
+  const r = state.route;
+  if (!r || !state.me) return [];
   if (r.type === 'channel') {
     const s = state.servers.find(x => x.id === r.serverId);
-    if (s) pool = s.members;
-  } else {
-    const p = getPeer(r.userId);
-    if (p) pool = [p];
+    return (s ? s.members : []).filter(u => u.id !== state.me.id);
   }
-  if (state.me) pool = [...pool, state.me];
-  const seen = new Set(), uniq = [];
-  for (const u of pool) if (u && !seen.has(u.id)) { seen.add(u.id); uniq.push(u); }
-  const t = token.toLowerCase();
-  const score = (u) => {
-    const un = u.username.toLowerCase(), dn = (u.displayName || '').toLowerCase();
-    if (un.startsWith(t) || dn.startsWith(t)) return 0;
-    if (un.includes(t) || dn.includes(t)) return 1;
-    return 2;
-  };
-  return uniq.map(u => ({ u, s: score(u) }))
-    .filter(x => x.s < 2)
-    .sort((a, b) => a.s - b.s)
-    .slice(0, 6).map(x => x.u);
+  const p = getPeer(r.userId);
+  return p ? [p] : [];
 }
-function hideMentionPop() {
-  mentionPop.hidden = true;
-  state.mentionUsers = [];
-  state.mentionIndex = 0;
-}
-function showMentionPop(token) {
-  const cands = mentionCandidates(token);
+function updateMentionPop() {
+  if (!state.route) { hideMentionPop(); return; }
+  const pos = composerInput.selectionStart ?? composerInput.value.length;
+  const upto = composerInput.value.slice(0, pos);
+  const m = upto.match(/(^|\s)@([a-zA-Z0-9_]*)$/);
+  if (!m) { hideMentionPop(); return; }
+  const prefix = m[2].toLowerCase();
+  const cands = mentionCandidates().filter(u =>
+    u.username.toLowerCase().startsWith(prefix) ||
+    (u.displayName || '').toLowerCase().startsWith(prefix)
+  ).slice(0, 6);
   if (!cands.length) { hideMentionPop(); return; }
   state.mentionUsers = cands;
   state.mentionIndex = 0;
   mentionPop.replaceChildren(...cands.map((u, i) => {
-    const item = el('button', 'mention-item' + (i === 0 ? ' is-active' : ''));
-    item.type = 'button';
-    item.append(avatarEl(u, { size: 24 }));
-    item.append(personMain(u));
-    item.addEventListener('click', () => insertMention(u));
-    return item;
+    const row = el('button', 'mention-item' + (i === 0 ? ' is-active' : ''));
+    row.type = 'button';
+    row.append(avatarEl(u, { size: 24 }));
+    row.append(el('span', 'row-label mono', '@' + u.username));
+    row.append(el('span', 'm-hint', u.displayName));
+    row.addEventListener('click', () => selectMention(u));
+    return row;
   }));
   mentionPop.hidden = false;
 }
-function renderMentionActive() {
-  [...mentionPop.children].forEach((c, i) => c.classList.toggle('is-active', i === state.mentionIndex));
+function hideMentionPop() {
+  mentionPop.hidden = true;
+  state.mentionUsers = [];
 }
-function insertMention(u) {
-  if (!u) return;
-  const pos = composerInput.selectionStart;
-  const before = composerInput.value.slice(0, pos);
-  const after = composerInput.value.slice(composerInput.selectionEnd);
-  const at = before.lastIndexOf('@');
-  if (at === -1) return;
-  const insert = '@' + u.username + ' ';
-  composerInput.value = before.slice(0, at) + insert + after;
-  const np = at + insert.length;
-  composerInput.setSelectionRange(np, np);
-  composerInput.focus();
+function moveMention(dir) {
+  const n = state.mentionUsers.length;
+  if (!n) return;
+  state.mentionIndex = (state.mentionIndex + dir + n) % n;
+  $$('.mention-item', mentionPop).forEach((b, i) => b.classList.toggle('is-active', i === state.mentionIndex));
+}
+function selectMention(u) {
+  const ta = composerInput;
+  const pos = ta.selectionStart ?? ta.value.length;
+  const before = ta.value.slice(0, pos);
+  const m = before.match(/@([a-zA-Z0-9_]*)$/);
+  if (m) {
+    const start = pos - m[1].length - 1;
+    ta.value = ta.value.slice(0, start) + '@' + u.username + ' ' + ta.value.slice(pos);
+    const np = start + u.username.length + 2;
+    ta.setSelectionRange(np, np);
+  }
   hideMentionPop();
-  autosize();
+  ta.focus();
 }
 
-composerInput.addEventListener('input', () => {
-  autosize();
-  const has = composerInput.value.trim().length > 0;
-  if (has && !typingSent) { typingSent = true; emitTyping(true); }
-  clearTimeout(typingTimer);
-  typingTimer = setTimeout(() => { typingSent = false; emitTyping(false); }, 1600);
-  const pos = composerInput.selectionStart;
-  const before = composerInput.value.slice(0, pos);
-  const m = before.match(/@([a-zA-Z0-9_]*)$/);
-  if (m) showMentionPop(m[1]); else hideMentionPop();
-});
-composerInput.addEventListener('keydown', (e) => {
+function composerKeydown(e) {
   if (!mentionPop.hidden && state.mentionUsers.length) {
-    if (e.key === 'ArrowDown') {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
       e.preventDefault();
-      state.mentionIndex = (state.mentionIndex + 1) % state.mentionUsers.length;
-      renderMentionActive(); return;
-    }
-    if (e.key === 'ArrowUp') {
-      e.preventDefault();
-      state.mentionIndex = (state.mentionIndex - 1 + state.mentionUsers.length) % state.mentionUsers.length;
-      renderMentionActive(); return;
+      moveMention(e.key === 'ArrowDown' ? 1 : -1);
+      return;
     }
     if (e.key === 'Enter' || e.key === 'Tab') {
       e.preventDefault();
-      insertMention(state.mentionUsers[state.mentionIndex]); return;
-    }
-    if (e.key === 'Escape') { e.preventDefault(); hideMentionPop(); return; }
-  }
-  if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendMessage(); }
-});
-sendBtn.addEventListener('click', () => sendMessage());
-
-/* ---------- image attachment ---------- */
-function fileToImage(file) {
-  return new Promise((resolve, reject) => {
-    if (file.type === 'image/gif') {
-      if (file.size < 280000) {
-        const r = new FileReader();
-        r.onload = () => resolve(r.result);
-        r.onerror = () => reject(new Error('Could not read that image'));
-        r.readAsDataURL(file);
-      } else {
-        reject(new Error('GIF files must be under 280KB — use the GIF picker for bigger ones'));
-      }
+      selectMention(state.mentionUsers[state.mentionIndex]);
       return;
     }
-    const img = new Image();
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      hideMentionPop();
+      return;
+    }
+  }
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    sendMessage();
+    return;
+  }
+  if (e.key === 'Escape' && state.replyTo) {
+    e.preventDefault();
+    state.replyTo = null;
+    renderReplyBar();
+    return;
+  }
+  if (e.key === 'ArrowUp' && composerInput.value === '' && state.route && state.me) {
+    const mine = [...state.messages].reverse().find(m => m.authorId === state.me.id && !m.deleted);
+    if (mine) { e.preventDefault(); startEdit(mine); }
+  }
+}
+
+/* ---------- image attach (client-side compression) ---------- */
+function readAsDataURL(file) {
+  return new Promise((res, rej) => {
+    const r = new FileReader();
+    r.onload = () => res(r.result);
+    r.onerror = rej;
+    r.readAsDataURL(file);
+  });
+}
+function compressImage(file, maxDim, quality) {
+  return new Promise((resolve, reject) => {
     const url = URL.createObjectURL(file);
+    const img = new Image();
     img.onload = () => {
-      const max = 1280;
-      const scale = Math.min(1, max / Math.max(img.width, img.height));
-      const w = Math.round(img.width * scale), h = Math.round(img.height * scale);
-      const cv = document.createElement('canvas');
-      cv.width = w; cv.height = h;
-      cv.getContext('2d').drawImage(img, 0, 0, w, h);
-      URL.revokeObjectURL(url);
-      let data = cv.toDataURL('image/jpeg', 0.78);
-      if (data.length > 500000) data = cv.toDataURL('image/jpeg', 0.6);
-      if (data.length > 550000) { reject(new Error('Image too large after compression')); return; }
-      resolve(data);
+      try {
+        const scale = Math.min(1, (maxDim / Math.max(img.width, img.height)) || 1);
+        const w = Math.max(1, Math.round(img.width * scale));
+        const h = Math.max(1, Math.round(img.height * scale));
+        const cv = document.createElement('canvas');
+        cv.width = w; cv.height = h;
+        const ctx = cv.getContext('2d');
+        ctx.drawImage(img, 0, 0, w, h);
+        let out = cv.toDataURL('image/webp', quality);
+        if (!out.startsWith('data:image/webp')) {
+          const cv2 = document.createElement('canvas');
+          cv2.width = w; cv2.height = h;
+          const c2 = cv2.getContext('2d');
+          c2.fillStyle = '#ffffff';
+          c2.fillRect(0, 0, w, h);
+          c2.drawImage(img, 0, 0, w, h);
+          out = cv2.toDataURL('image/jpeg', quality);
+        }
+        URL.revokeObjectURL(url);
+        resolve(out);
+      } catch (err) { URL.revokeObjectURL(url); reject(err); }
     };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not read that image')); };
+    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Couldn’t decode that image')); };
     img.src = url;
   });
 }
-imageFile.addEventListener('change', async () => {
-  const file = imageFile.files[0];
+async function handleImageFile(file) {
   if (!file) return;
-  try { state.pendingImage = await fileToImage(file); renderPendingImage(); }
-  catch (e) { toast(e.message, 'error'); }
-  imageFile.value = '';
-});
-attachBtn.addEventListener('click', () => imageFile.click());
-pendingImageRemove.addEventListener('click', () => { state.pendingImage = null; renderPendingImage(); });
-replyCancel.addEventListener('click', () => { state.replyTo = null; renderReplyBar(); });
-
-/* ---------- send ---------- */
-function sendMessage(extra = {}) {
-  const r = state.route;
-  if (!r || !state.socket) return;
-  const text = composerInput.value.trim();
-  const image = extra.image || state.pendingImage || null;
-  if (!text && !image) return;
-  state.socket.emit('message:send', {
-    roomType: r.type === 'channel' ? 'channel' : 'dm',
-    target: r.type === 'channel' ? r.channelId : r.userId,
-    text,
-    image,
-    replyTo: state.replyTo ? state.replyTo.id : null
-  });
-  composerInput.value = '';
-  autosize();
-  state.pendingImage = null; renderPendingImage();
-  state.replyTo = null; renderReplyBar();
-  hideMentionPop();
-  typingSent = false; clearTimeout(typingTimer); emitTyping(false);
+  if (!file.type.startsWith('image/')) { toast('That file isn’t an image', 'error'); return; }
+  try {
+    let src;
+    /* keep small GIFs animated — everything else gets compressed */
+    if (file.type === 'image/gif' && file.size < 500 * 1024) {
+      src = await readAsDataURL(file);
+    } else {
+      src = await compressImage(file, 1280, 0.82);
+      if (src.length > 560000) src = await compressImage(file, 1000, 0.6);
+    }
+    if (src.length > 590000) { toast('Image too large even after compression', 'error'); return; }
+    state.pendingImage = src;
+    renderPendingImage();
+  } catch { toast('Couldn’t read that image', 'error'); }
+  finally { imageFile.value = ''; }
 }
-
-chatScroll.addEventListener('scroll', () => {
-  const far = chatScroll.scrollHeight - chatScroll.scrollTop - chatScroll.clientHeight > 300;
-  jumpBtn.classList.toggle('show', far);
-}, { passive: true });
-jumpBtn.addEventListener('click', () =>
-  chatScroll.scrollTo({ top: chatScroll.scrollHeight, behavior: 'smooth' }));
+function insertAtCaret(ta, str) {
+  const s = ta.selectionStart, e = ta.selectionEnd;
+  ta.setRangeText(str, s, e, 'end');
+}
 
 /* =====================================================================
-   MODALS
+   EMOJI POPOVER (reactions + composer)
 ===================================================================== */
-function fieldEl(label, input) {
-  const f = el('label', 'field');
-  f.append(el('span', 'field-label mono', label));
-  f.append(input);
-  return f;
+let emojiPopEl = null, emojiPopDown = null;
+function closeEmojiPop() {
+  if (emojiPopEl) { emojiPopEl.remove(); emojiPopEl = null; }
+  if (emojiPopDown) { document.removeEventListener('mousedown', emojiPopDown); emojiPopDown = null; }
 }
-function openAddServerModal() {
-  const nameInp = el('input'); nameInp.maxLength = 40; nameInp.placeholder = 'e.g. Late Night Club';
-  const codeInp = el('input', 'mono'); codeInp.placeholder = 'e.g. K7X4RM';
-  codeInp.style.textTransform = 'uppercase';
-  const err = el('p', 'form-error mono'); err.hidden = true;
-  const body = el('div');
-  body.append(fieldEl('SERVER NAME', nameInp));
-  const createBtn = el('button', 'btn btn-accent btn-block', 'Create server');
-  createBtn.type = 'button';
-  body.append(createBtn);
-  const divi = el('div', 'modal-divider');
-  divi.append(el('span', 'mono', 'OR JOIN WITH AN INVITE CODE'));
-  body.append(divi);
-  body.append(fieldEl('INVITE CODE', codeInp));
-  const joinBtn = el('button', 'btn btn-ghost btn-block', 'Join server');
-  joinBtn.type = 'button';
-  body.append(joinBtn, err);
-  const { close } = openModal({ title: 'Add a server', body, actions: [{ label: 'Cancel' }] });
-  const fail = (m) => { err.textContent = m; err.hidden = false; };
-  createBtn.addEventListener('click', async () => {
-    const name = nameInp.value.trim();
-    if (name.length < 2) return fail('Server name needs at least 2 characters');
-    createBtn.disabled = true;
-    try {
-      const d = await api('POST', '/api/servers', { name });
-      close();
-      toast(`Server “${name}” created`, 'success');
-      await loadServers();
-      openChannel(d.server.id, d.server.channels[0].id);
-    } catch (e) { fail(e.message); createBtn.disabled = false; }
-  });
-  joinBtn.addEventListener('click', async () => {
-    const code = codeInp.value.trim().toUpperCase();
-    if (!code) return fail('Enter an invite code');
-    joinBtn.disabled = true;
-    try {
-      const d = await api('POST', '/api/servers/join', { inviteCode: code });
-      close();
-      toast(`Joined “${d.server.name}”`, 'success');
-      await loadServers();
-      openChannel(d.server.id, d.server.channels[0].id);
-    } catch (e) { fail(e.message); joinBtn.disabled = false; }
-  });
+function openEmojiPop(anchor, onPick) {
+  closeEmojiPop();
+  const pop = el('div', 'emoji-pop');
+  for (const em of EMOJIS) {
+    const b = el('button', 'emoji-cell', em);
+    b.type = 'button';
+    b.addEventListener('click', () => { closeEmojiPop(); onPick(em); });
+    pop.append(b);
+  }
+  document.body.append(pop);
+  emojiPopEl = pop;
+  const r = anchor.getBoundingClientRect();
+  const w = pop.offsetWidth, h = pop.offsetHeight;
+  const x = Math.min(Math.max(8, r.left), window.innerWidth - w - 8);
+  let y = r.top - h - 8;
+  if (y < 8) y = Math.min(r.bottom + 8, window.innerHeight - h - 8);
+  pop.style.left = x + 'px';
+  pop.style.top = y + 'px';
+  emojiPopDown = (ev) => { if (emojiPopEl && !emojiPopEl.contains(ev.target)) closeEmojiPop(); };
+  setTimeout(() => document.addEventListener('mousedown', emojiPopDown), 0);
 }
-function openNewChannelModal() {
-  const s = state.servers.find(x => x.id === state.sidebarMode);
-  if (!s) return;
-  if (s.official) { toast('The community server can’t be edited'); return; }
-  if (s.ownerId !== state.me.id) { toast('Only the server owner can create channels'); return; }
-  const inp = el('input'); inp.placeholder = 'e.g. design-crit';
-  const err = el('p', 'form-error mono'); err.hidden = true;
-  const body = el('div');
-  body.append(fieldEl('CHANNEL NAME', inp), err);
-  const create = el('button', 'btn btn-accent btn-block', 'Create channel');
-  create.type = 'button';
-  body.append(create);
-  const { close } = openModal({ title: 'New channel', body, actions: [{ label: 'Cancel' }] });
-  create.addEventListener('click', async () => {
-    const name = inp.value.trim();
-    if (!name) { err.textContent = 'Give the channel a name'; err.hidden = false; return; }
-    create.disabled = true;
-    try {
-      await api('POST', `/api/servers/${s.id}/channels`, { name });
-      close();
-      toast(`#${name.replace(/\s+/g, '-').toLowerCase()} created`, 'success');
-      await loadServers();
-      const created = (state.servers.find(x => x.id === s.id) || s).channels.slice(-1)[0];
-      if (created) openChannel(s.id, created.id);
-    } catch (e) { err.textContent = e.message; err.hidden = false; create.disabled = false; }
-  });
-}
-function confirmLeaveServer(s) {
-  openModal({
-    title: 'Leave server',
-    body: `You’ll need an invite code to rejoin “${s.name}”.`,
-    actions: [
-      { label: 'Cancel' },
-      { label: 'Leave server', cls: 'btn-danger', onClick: async () => {
-        await api('DELETE', `/api/servers/${s.id}/leave`);
-        toast(`Left “${s.name}”`);
-        await loadServers();
-        if (state.servers.length) openChannel(state.servers[0].id, state.servers[0].channels[0].id);
-        else goHome();
-      } }
-    ]
-  });
-}
-function openServerSettingsModal(s) {
-  if (s.official) { toast('The community server can’t be edited'); return; }
-  let iconPreview = s.icon || null;
-  const nameInp = el('input'); nameInp.maxLength = 40; nameInp.value = s.name;
-  const err = el('p', 'form-error mono'); err.hidden = true;
 
-  const iconSlot = el('span');
-  const fileInp = el('input'); fileInp.type = 'file'; fileInp.accept = 'image/*'; fileInp.hidden = true;
-  const uploadLbl = el('label', 'btn btn-ghost btn-sm');
-  uploadLbl.append(el('span', '', 'Upload icon'), fileInp);
-  const removeBtn = el('button', 'btn btn-ghost btn-sm', 'Remove');
-  const actions = el('div', 'avatar-actions'); actions.append(uploadLbl, removeBtn);
-  const row = el('div', 'avatar-row'); row.append(iconSlot, actions);
-
-  const renderIcon = () => {
-    const w = el('span', 'server-icon');
-    w.style.setProperty('--sv', '64px');
-    if (iconPreview) { const im = el('img'); im.src = iconPreview; w.append(im); }
-    else w.append(el('span', '', serverInitials(nameInp.value || s.name)));
-    iconSlot.replaceChildren(w);
-    removeBtn.disabled = !iconPreview;
-  };
-  renderIcon();
-  nameInp.addEventListener('input', renderIcon);
-  fileInp.addEventListener('change', async () => {
-    const f = fileInp.files[0];
-    if (!f) return;
-    try { iconPreview = await fileToAvatar(f); renderIcon(); }
-    catch (e) { toast(e.message, 'error'); }
-    fileInp.value = '';
-  });
-  removeBtn.addEventListener('click', () => { iconPreview = null; renderIcon(); });
-
-  const save = el('button', 'btn btn-accent btn-block', 'Save settings');
-  save.type = 'button';
-  const body = el('div');
-  body.append(row, fieldEl('SERVER NAME', nameInp), save, err);
-  const { close } = openModal({ title: 'Server settings', body, actions: [{ label: 'Cancel' }] });
-  save.addEventListener('click', async () => {
-    const name = nameInp.value.trim();
-    if (name.length < 2) { err.textContent = 'Name needs at least 2 characters'; err.hidden = false; return; }
-    save.disabled = true;
-    try {
-      await api('PATCH', `/api/servers/${s.id}`, { name, icon: iconPreview });
-      close();
-      toast('Server updated', 'success');
-      loadServers();
-    } catch (e) { err.textContent = e.message; err.hidden = false; save.disabled = false; }
-  });
+/* =====================================================================
+   LIGHTBOX / GIF PICKER / QUICK SWITCHER
+===================================================================== */
+function openLightbox(src) {
+  const img = el('img', 'lightbox-img');
+  img.src = src; img.alt = 'image';
+  openModal({ title: 'Image', body: img, actions: [{ label: 'Close' }] });
 }
+
 function openGifModal() {
-  if (!state.gifsEnabled) { toast('GIFs aren’t configured on the server'); return; }
   const search = el('input', 'gif-search');
   search.placeholder = 'Search Tenor…';
-  const grid = el('div', 'gif-grid');
+  search.spellcheck = false;
   const status = el('p', 'gif-status mono', 'LOADING…');
-  const body = el('div', 'gif-wrap');
-  body.append(search, status, grid);
-  const { close } = openModal({ title: 'GIFs', body, actions: [{ label: 'Close' }] });
-  const load = (q) => {
-    status.hidden = false; status.textContent = 'LOADING…';
+  const grid = el('div', 'gif-grid');
+  const wrap = el('div', 'gif-wrap');
+  wrap.append(search, status, grid);
+  const { close } = openModal({ title: 'Pick a GIF', body: wrap, actions: [{ label: 'Cancel' }] });
+
+  let deb = null, seq = 0;
+  async function load(q) {
+    const my = ++seq;
+    status.textContent = 'LOADING…';
     grid.replaceChildren();
-    api('GET', '/api/gifs/search?q=' + encodeURIComponent(q)).then(d => {
-      if (!d.gifs.length) { status.textContent = 'NO GIFS FOUND'; return; }
-      status.hidden = true;
-      grid.replaceChildren(...d.gifs.map(g => {
-        const item = el('button', 'gif-item');
-        item.type = 'button';
-        item.title = g.desc || '';
+    try {
+      const d = await api('GET', '/api/gifs/search?q=' + encodeURIComponent(q));
+      if (my !== seq) return;
+      if (!d.configured) { status.textContent = 'GIFS ARE NOT CONFIGURED ON THIS SERVER'; return; }
+      status.textContent = d.gifs.length ? '' : 'NO RESULTS';
+      for (const g of d.gifs) {
+        const b = el('button', 'gif-item');
+        b.type = 'button';
+        b.title = g.desc || '';
         const img = el('img');
         img.src = g.preview || g.url;
+        img.alt = g.desc || 'gif';
         img.loading = 'lazy';
-        img.alt = g.desc || '';
-        img.addEventListener('error', () => item.remove());
-        item.append(img);
-        item.addEventListener('click', () => { close(); sendMessage({ image: g.url }); });
-        return item;
-      }));
-    }).catch(e => { status.textContent = e.message.toUpperCase(); });
-  };
-  load('');
-  let deb;
+        b.append(img);
+        b.addEventListener('click', () => {
+          state.pendingImage = g.url;
+          renderPendingImage();
+          close();
+          toast('GIF attached — it sends with your next message');
+        });
+        grid.append(b);
+      }
+    } catch (e) {
+      if (my === seq) status.textContent = e.message.toUpperCase();
+    }
+  }
   search.addEventListener('input', () => {
     clearTimeout(deb);
     deb = setTimeout(() => load(search.value.trim()), 350);
   });
+  load('');
+  setTimeout(() => search.focus(), 60);
 }
-function openLightbox(src) {
-  const img = el('img', 'lightbox-img');
-  img.src = src;
-  img.alt = 'image';
-  openModal({ title: 'Image', body: img, actions: [{ label: 'Close' }] });
+
+function openQuickSwitcher() {
+  const items = [{ label: 'Home', hint: 'Friends', run: () => goHome() }];
+  for (const s of state.servers) {
+    for (const c of s.channels) items.push({ label: '# ' + c.name, hint: s.name, run: () => openChannel(s.id, c.id) });
+  }
+  for (const f of state.friends.friends) items.push({ label: f.displayName, hint: '@' + f.username, run: () => openDm(f.id) });
+
+  const input = el('input', 'gif-search');
+  input.placeholder = 'Jump to… channels, servers, people';
+  input.spellcheck = false;
+  const list = el('div', 'switch-list');
+  const body = el('div');
+  body.append(input, list);
+  const { close } = openModal({ title: 'Quick switcher', body, actions: [{ label: 'Close' }] });
+
+  let idx = 0, shown = items;
+  const render = () => {
+    const q = input.value.trim().toLowerCase();
+    shown = items.filter(it =>
+      !q || it.label.toLowerCase().includes(q) || it.hint.toLowerCase().includes(q)).slice(0, 20);
+    idx = Math.min(idx, Math.max(0, shown.length - 1));
+    list.replaceChildren(...shown.map((it, i) => {
+      const b = el('button', 'switch-row' + (i === idx ? ' is-active' : ''));
+      b.type = 'button';
+      b.append(el('span', '', it.label));
+      b.append(el('span', 'hint mono', it.hint));
+      b.addEventListener('click', () => { close(); it.run(); });
+      return b;
+    }));
+    if (!shown.length) list.append(el('p', 'gif-status mono', 'NO MATCHES'));
+  };
+  input.addEventListener('input', () => { idx = 0; render(); });
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'ArrowDown') { e.preventDefault(); idx = Math.min(idx + 1, shown.length - 1); render(); }
+    else if (e.key === 'ArrowUp') { e.preventDefault(); idx = Math.max(idx - 1, 0); render(); }
+    else if (e.key === 'Enter') { e.preventDefault(); const it = shown[idx]; if (it) { close(); it.run(); } }
+  });
+  render();
+  setTimeout(() => input.focus(), 60);
 }
 
 /* =====================================================================
-   SETTINGS
+   SERVER / CHANNEL MODALS
 ===================================================================== */
-let avatarPreview = null;
+function openServerModal() {
+  const body = el('div');
+  const nameF = el('label', 'field');
+  nameF.append(el('span', 'field-label mono', 'SERVER NAME'));
+  const nameIn = el('input');
+  nameIn.maxLength = 40; nameIn.spellcheck = false;
+  nameF.append(nameIn);
+  const createBtn = el('button', 'btn btn-accent btn-block', 'Create server');
+  createBtn.type = 'button';
+  body.append(nameF, createBtn);
+
+  body.append(el('div', 'modal-divider', 'OR JOIN WITH AN INVITE CODE'));
+  const codeF = el('label', 'field');
+  codeF.append(el('span', 'field-label mono', 'INVITE CODE'));
+  const codeIn = el('input');
+  codeIn.spellcheck = false;
+  codeIn.placeholder = 'e.g. SLATE1';
+  codeIn.style.textTransform = 'uppercase';
+  codeF.append(codeIn);
+  const joinBtn = el('button', 'btn btn-ghost btn-block', 'Join server');
+  joinBtn.type = 'button';
+  body.append(codeF, joinBtn);
+
+  const { close } = openModal({ title: 'Add a server', body, actions: [{ label: 'Close' }] });
+  setTimeout(() => nameIn.focus(), 60);
+
+  modalAction(createBtn, async () => {
+    const name = nameIn.value.trim();
+    if (name.length < 2) throw new Error('Server name needs at least 2 characters');
+    const d = await api('POST', '/api/servers', { name });
+    await loadServers();
+    close();
+    if (d.server && d.server.channels.length) openChannel(d.server.id, d.server.channels[0].id);
+    toast(`Server “${d.server.name}” created`, 'success');
+  });
+  modalAction(joinBtn, async () => {
+    const code = codeIn.value.trim().toUpperCase();
+    if (!code) throw new Error('Enter an invite code');
+    const d = await api('POST', '/api/servers/join', { inviteCode: code });
+    await loadServers();
+    close();
+    if (d.server && d.server.channels.length) openChannel(d.server.id, d.server.channels[0].id);
+    toast(`You joined ${d.server.name}`, 'success');
+  });
+}
+
+function openNewChannelModal() {
+  const r = state.route;
+  const serverId = (r && r.type === 'channel') ? r.serverId : state.sidebarMode;
+  const s = state.servers.find(x => x.id === serverId);
+  if (!s) return;
+  const body = el('div');
+  const f = el('label', 'field');
+  f.append(el('span', 'field-label mono', 'CHANNEL NAME'));
+  const inp = el('input');
+  inp.spellcheck = false;
+  inp.placeholder = 'e.g. design';
+  f.append(inp);
+  f.append(el('span', 'field-hint mono', '1–24 chars — letters, numbers, - and _'));
+  const btn = el('button', 'btn btn-accent btn-block', 'Create channel');
+  btn.type = 'button';
+  body.append(f, btn);
+  const { close } = openModal({ title: 'New channel · ' + s.name, body, actions: [{ label: 'Cancel' }] });
+  setTimeout(() => inp.focus(), 60);
+  modalAction(btn, async () => {
+    const name = inp.value.trim().toLowerCase().replace(/\s+/g, '-');
+    const d = await api('POST', `/api/servers/${s.id}/channels`, { name });
+    await loadServers();
+    close();
+    openChannel(s.id, d.channel.id);
+    toast(`#${d.channel.name} created`, 'success');
+  });
+}
+
+function openServerSettingsModal(server) {
+  let iconData; /* undefined = unchanged, null = removed, string = new */
+  const body = el('div');
+
+  const nameF = el('label', 'field');
+  nameF.append(el('span', 'field-label mono', 'SERVER NAME'));
+  const nameIn = el('input');
+  nameIn.value = server.name; nameIn.maxLength = 40; nameIn.spellcheck = false;
+  nameF.append(nameIn);
+  body.append(nameF);
+
+  body.append(el('p', 'field-label mono', 'ICON'));
+  const iconRow = el('div', 'avatar-row');
+  const preview = el('span', 'server-icon');
+  const renderPreview = () => {
+    preview.replaceChildren();
+    const src = iconData !== undefined ? iconData : server.icon;
+    if (src) {
+      const img = el('img'); img.src = src; img.alt = '';
+      preview.append(img);
+    } else preview.append(el('span', '', serverInitials(server.name)));
+  };
+  renderPreview();
+  const upload = el('label', 'btn btn-ghost btn-sm');
+  upload.append(el('span', '', 'Upload icon'));
+  const fileIn = el('input');
+  fileIn.type = 'file'; fileIn.accept = 'image/*'; fileIn.hidden = true;
+  upload.append(fileIn);
+  const rmBtn = el('button', 'btn btn-ghost btn-sm', 'Remove');
+  rmBtn.type = 'button';
+  rmBtn.addEventListener('click', () => { iconData = null; renderPreview(); });
+  fileIn.addEventListener('change', async () => {
+    const file = fileIn.files[0];
+    if (!file) return;
+    try {
+      const data = await compressImage(file, 128, 0.8);
+      if (data.length > 390000) { toast('Icon too large — try a smaller image', 'error'); }
+      else { iconData = data; renderPreview(); }
+    } catch { toast('Couldn’t read that image', 'error'); }
+    fileIn.value = '';
+  });
+  iconRow.append(preview, upload, rmBtn);
+  body.append(iconRow);
+
+  const saveBtn = el('button', 'btn btn-accent btn-block', 'Save changes');
+  saveBtn.type = 'button';
+  body.append(saveBtn);
+
+  body.append(el('div', 'modal-divider', `CHANNELS — ${server.channels.length}`));
+  for (const c of server.channels) {
+    const row = el('div', 'channel-manage-row');
+    row.append(icon('hash', 'row-icon'));
+    row.append(el('span', 'row-label', c.name));
+    const del = iconBtn('trash', 'icon-btn-danger', 'Delete channel');
+    del.addEventListener('click', () => confirmDeleteChannel(server, c));
+    row.append(del);
+    body.append(row);
+  }
+
+  body.append(el('div', 'modal-divider', 'INVITE'));
+  const inv = el('div', 'invite-row mono');
+  inv.append(el('span', 'invite-label', 'CODE'));
+  inv.append(el('span', 'invite-code', server.inviteCode));
+  const copyBtn = iconBtn('copy', '', 'Copy invite code');
+  copyBtn.addEventListener('click', async () => {
+    try { await navigator.clipboard.writeText(server.inviteCode); toast('Invite code copied', 'success'); }
+    catch { toast('Copy failed — code is ' + server.inviteCode, 'error'); }
+  });
+  inv.append(copyBtn);
+  body.append(inv);
+
+  const { close } = openModal({ title: 'Server settings', body, actions: [{ label: 'Close' }] });
+  modalAction(saveBtn, async () => {
+    const payload = {};
+    const name = nameIn.value.trim();
+    if (name !== server.name) payload.name = name;
+    if (iconData !== undefined) payload.icon = iconData;
+    if (!Object.keys(payload).length) { close(); return; }
+    await api('PATCH', `/api/servers/${server.id}`, payload);
+    await loadServers();
+    close();
+    toast('Server saved', 'success');
+    requestRender();
+  });
+}
+
+function confirmDeleteChannel(server, channel) {
+  openModal({
+    title: 'Delete #' + channel.name,
+    body: 'The channel and all its messages will be deleted for everyone. This can’t be undone.',
+    actions: [
+      { label: 'Cancel' },
+      { label: 'Delete', cls: 'btn-danger', onClick: async () => {
+        await api('DELETE', `/api/servers/${server.id}/channels/${channel.id}`);
+        await loadServers();
+        const r = state.route;
+        if (r && r.type === 'channel' && r.channelId === channel.id) {
+          const s = state.servers.find(x => x.id === server.id);
+          if (s && s.channels.length) openChannel(s.id, s.channels[0].id);
+          else goHome();
+        }
+        toast(`#${channel.name} deleted`, 'success');
+      } }
+    ]
+  });
+}
+function confirmLeaveServer(s) {
+  openModal({
+    title: 'Leave ' + s.name,
+    body: 'You’ll stop receiving messages from this server. You can rejoin later with the invite code.',
+    actions: [
+      { label: 'Cancel' },
+      { label: 'Leave server', cls: 'btn-danger', onClick: async () => {
+        await api('DELETE', `/api/servers/${s.id}/leave`);
+        await loadServers();
+        goHome();
+        toast(`You left ${s.name}`);
+      } }
+    ]
+  });
+}
+function confirmLogout() {
+  openModal({
+    title: 'Log out',
+    body: 'You’ll be signed out of slate on this device.',
+    actions: [
+      { label: 'Cancel' },
+      { label: 'Log out', cls: 'btn-danger', onClick: () => { doLogout(); } }
+    ]
+  });
+}
+
+/* =====================================================================
+   SETTINGS PANEL
+===================================================================== */
 function openSettings() {
   if (!state.me) return;
-  avatarPreview = state.me.avatar || null;
-  settingsPanel.classList.add('open');
-  scrimSettings.classList.add('show');
   usernameInput.value = state.me.username;
-  displayNameInput.value = state.me.displayName;
+  displayNameInput.value = state.me.displayName || '';
   bioInput.value = state.me.bio || '';
   bioCount.textContent = String(bioInput.value.length);
   renderSettingsAvatar();
-  const factRow = (k, v) => {
+  accountFacts.replaceChildren(...[
+    ['USERNAME', state.me.username],
+    ['EMAIL', state.me.email],
+    ['JOINED', new Date(state.me.createdAt).toLocaleDateString([], { year: 'numeric', month: 'short', day: 'numeric' })],
+    ['USER ID', state.me.id]
+  ].map(([k, v]) => {
     const row = el('div', 'fact-row');
     row.append(el('dt', '', k), el('dd', '', v));
     return row;
-  };
-  accountFacts.replaceChildren(
-    factRow('USERNAME', '@' + state.me.username),
-    factRow('EMAIL', state.me.email),
-    factRow('MEMBER SINCE', new Date(state.me.createdAt)
-      .toLocaleDateString([], { day: 'numeric', month: 'short', year: 'numeric' }).toUpperCase())
-  );
+  }));
   settingsApi.textContent = API_BASE;
+  settingsPanel.classList.add('open');
+  scrimSettings.classList.add('show');
 }
 function closeSettings() {
   settingsPanel.classList.remove('open');
   scrimSettings.classList.remove('show');
 }
 function renderSettingsAvatar() {
-  settingsAvatar.replaceChildren(avatarEl({ ...state.me, avatar: avatarPreview }, { size: 64 }));
-  avatarRemove.disabled = !avatarPreview;
+  settingsAvatar.replaceChildren(avatarEl(state.me, { size: 64 }));
 }
-function fileToAvatar(file) {
-  return new Promise((resolve, reject) => {
-    const img = new Image();
-    const url = URL.createObjectURL(file);
-    img.onload = () => {
-      const size = 128;
-      const cv = document.createElement('canvas');
-      cv.width = cv.height = size;
-      const ctx = cv.getContext('2d');
-      const scale = Math.max(size / img.width, size / img.height);
-      const w = img.width * scale, h = img.height * scale;
-      ctx.drawImage(img, (size - w) / 2, (size - h) / 2, w, h);
-      URL.revokeObjectURL(url);
-      let data = cv.toDataURL('image/png');
-      if (data.length > 300000) data = cv.toDataURL('image/jpeg', 0.82);
-      if (data.length > 400000) { reject(new Error('That image is too large')); return; }
-      resolve(data);
-    };
-    img.onerror = () => { URL.revokeObjectURL(url); reject(new Error('Could not read that image')); };
-    img.src = url;
-  });
-}
-avatarFile.addEventListener('change', async () => {
-  const file = avatarFile.files[0];
-  if (!file) return;
-  try { avatarPreview = await fileToAvatar(file); renderSettingsAvatar(); }
-  catch (e) { toast(e.message, 'error'); }
-  avatarFile.value = '';
-});
-avatarRemove.addEventListener('click', () => { avatarPreview = null; renderSettingsAvatar(); });
-bioInput.addEventListener('input', () => { bioCount.textContent = String(bioInput.value.length); });
-
-profileSave.addEventListener('click', async () => {
-  const username = usernameInput.value.trim();
+async function saveProfile() {
   const displayName = displayNameInput.value.trim();
   if (!displayName) { toast('Display name cannot be empty', 'error'); return; }
   profileSave.disabled = true;
   try {
     const d = await api('PATCH', '/api/me', {
-      username, displayName, bio: bioInput.value.trim(), avatar: avatarPreview
+      username: usernameInput.value.trim(),
+      displayName,
+      bio: bioInput.value.trim()
     });
-    state.me = { ...state.me, ...d.user };
-    state.authors[state.me.id] = { ...state.me };
+    state.me = d.user;
+    state.authors[d.user.id] = { ...d.user };
+    renderSettingsAvatar();
+    requestRender();
     toast('Profile saved', 'success');
-    renderRail(); renderMembers();
   } catch (e) { toast(e.message, 'error'); }
-  finally { profileSave.disabled = false; }
-});
-logoutBtn.addEventListener('click', () => doLogout());
+  profileSave.disabled = false;
+}
+async function handleAvatarFile(file) {
+  if (!file) return;
+  try {
+    const data = await compressImage(file, 256, 0.85);
+    if (data.length > 390000) { toast('Picture too large — try a smaller image', 'error'); return; }
+    const d = await api('PATCH', '/api/me', { avatar: data });
+    state.me = d.user;
+    state.authors[d.user.id] = { ...d.user };
+    renderSettingsAvatar();
+    requestRender();
+    toast('Picture updated', 'success');
+  } catch (e) { toast(e.message, 'error'); }
+  avatarFile.value = '';
+}
+async function removeAvatar() {
+  try {
+    const d = await api('PATCH', '/api/me', { avatar: null });
+    state.me = d.user;
+    state.authors[d.user.id] = { ...d.user };
+    renderSettingsAvatar();
+    requestRender();
+  } catch (e) { toast(e.message, 'error'); }
+}
 
 /* =====================================================================
-   WIRING
+   APP WIRING
 ===================================================================== */
-railHome.append(icon('home'));
-railAdd.append(icon('plus'));
-railFriends.append(icon('users'), el('span', 'rail-badge mono'));
-railFriends.querySelector('.rail-badge').hidden = true;
-attachBtn.append(icon('image'));
-sendBtn.append(icon('send'));
-menuBtn.append(icon('menu'));
-membersToggle.append(icon('users'));
-settingsClose.append(icon('x'));
-jumpBtn.append(icon('arrow-down'));
- $('#replyIconSlot').append(icon('reply', 'mini-icon'));
+function wireApp() {
+  /* static icons */
+  railHome.append(icon('home'));
+  railFriends.append(icon('users'));
+  railAdd.append(icon('plus'));
+  menuBtn.append(icon('menu'));
+  sendBtn.append(icon('send'));
+  attachBtn.append(icon('image'));
+  emojiBtn.append(icon('smile'));
+  replyCancel.append(icon('x'));
+  pendingImageRemove.append(icon('x'));
+  settingsClose.append(icon('x'));
+  jumpBtn.append(icon('arrow-down'));
+  membersToggle.append(icon('users'));
 
-railHome.addEventListener('click', () => goHome());
-railFriends.addEventListener('click', () => goHome('online'));
-railAvatar.addEventListener('click', openSettings);
-settingsClose.addEventListener('click', closeSettings);
-scrimSettings.addEventListener('click', closeSettings);
-railAdd.addEventListener('click', openAddServerModal);
-gifBtn.addEventListener('click', openGifModal);
+  railHome.addEventListener('click', () => goHome());
+  railFriends.addEventListener('click', () => goHome('online'));
+  railAdd.addEventListener('click', openServerModal);
+  railTheme.addEventListener('click', () =>
+    setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
+  railAvatar.addEventListener('click', openSettings);
 
-homeTabs.addEventListener('click', (e) => {
-  const b = e.target.closest('.home-tab');
-  if (!b) return;
-  state.homeTab = b.dataset.homeTab;
-  renderHomeTabs();
-  renderHome();
-});
+  /* mobile drawers */
+  menuBtn.addEventListener('click', () => {
+    if (sidebar.classList.contains('open')) closeDrawers();
+    else { sidebar.classList.add('open'); scrimSidebar.classList.add('show'); }
+  });
+  scrimSidebar.addEventListener('click', closeDrawers);
+  scrimMembers.addEventListener('click', closeDrawers);
+  membersToggle.addEventListener('click', () => {
+    if (window.innerWidth <= 1080) {
+      const open = membersPanel.classList.toggle('open');
+      scrimMembers.classList.toggle('show', open);
+    } else {
+      const on = appView.classList.toggle('members-on');
+      localStorage.setItem(LS.members, on ? 'on' : 'off');
+    }
+  });
 
-railTheme.addEventListener('click', () =>
-  setTheme(document.documentElement.dataset.theme === 'dark' ? 'light' : 'dark'));
- $$('.seg-btn', $('#themeSeg')).forEach(b =>
-  b.addEventListener('click', () => setTheme(b.dataset.themeSet)));
+  homeTabs.addEventListener('click', (e) => {
+    const b = e.target.closest('[data-home-tab]');
+    if (!b) return;
+    state.homeTab = b.dataset.homeTab;
+    renderHome();
+  });
+  emptyCtaFriends.addEventListener('click', () => goHome('add'));
+  emptyCtaServer.addEventListener('click', openServerModal);
 
-membersToggle.addEventListener('click', () => {
-  if (matchMedia('(min-width:1081px)').matches) {
-    const on = appView.classList.toggle('members-on');
-    localStorage.setItem(LS.members, on ? 'on' : 'off');
-  } else {
-    const open = membersPanel.classList.toggle('open');
-    scrimMembers.classList.toggle('show', open);
+  /* composer */
+  composerInput.addEventListener('input', () => { autosize(); updateMentionPop(); queueTyping(); });
+  composerInput.addEventListener('keydown', composerKeydown);
+  composerInput.addEventListener('blur', () => setTimeout(() => {
+    if (!mentionPop.contains(document.activeElement)) hideMentionPop();
+  }, 120));
+  sendBtn.addEventListener('click', sendMessage);
+  attachBtn.addEventListener('click', () => imageFile.click());
+  imageFile.addEventListener('change', () => handleImageFile(imageFile.files[0]));
+  pendingImageRemove.addEventListener('click', () => { state.pendingImage = null; renderPendingImage(); });
+  replyCancel.addEventListener('click', () => { state.replyTo = null; renderReplyBar(); });
+  gifBtn.addEventListener('click', openGifModal);
+  emojiBtn.addEventListener('click', () => openEmojiPop(emojiBtn, (em) => {
+    insertAtCaret(composerInput, em);
+    autosize();
+    composerInput.focus();
+    queueTyping();
+  }));
+
+  /* scroll */
+  jumpBtn.addEventListener('click', () => {
+    chatScroll.scrollTo({ top: chatScroll.scrollHeight, behavior: 'smooth' });
+  });
+  chatScroll.addEventListener('scroll', () => {
+    jumpBtn.classList.toggle('show', !isPinned() && state.messages.length > 0);
+    if (emojiPopEl) closeEmojiPop();
+  });
+
+  /* settings */
+  settingsClose.addEventListener('click', closeSettings);
+  scrimSettings.addEventListener('click', closeSettings);
+  profileSave.addEventListener('click', saveProfile);
+  avatarFile.addEventListener('change', () => handleAvatarFile(avatarFile.files[0]));
+  avatarRemove.addEventListener('click', removeAvatar);
+  bioInput.addEventListener('input', () => { bioCount.textContent = String(bioInput.value.length); });
+  logoutBtn.addEventListener('click', confirmLogout);
+  $('#themeSeg').addEventListener('click', (e) => {
+    const b = e.target.closest('.seg-btn');
+    if (b) setTheme(b.dataset.themeSet);
+  });
+
+  document.addEventListener('keydown', globalKeydown);
+}
+
+function globalKeydown(e) {
+  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+    if (state.me && !appView.hidden) { e.preventDefault(); openQuickSwitcher(); }
+    return;
   }
-});
-scrimMembers.addEventListener('click', closeDrawers);
-scrimSidebar.addEventListener('click', closeDrawers);
-menuBtn.addEventListener('click', openSidebarDrawer);
-
-emptyCtaFriends.addEventListener('click', () => { goHome('add'); openSidebarDrawer(); });
-emptyCtaServer.addEventListener('click', openAddServerModal);
-
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') { closeSettings(); closeDrawers(); }
-  if (e.key === '/' && !e.ctrlKey && !e.metaKey && state.route) {
-    const tag = document.activeElement && document.activeElement.tagName;
-    if (tag !== 'INPUT' && tag !== 'TEXTAREA') { e.preventDefault(); composerInput.focus(); }
-  }
-});
+  if (e.key !== 'Escape') return;
+  if ($('#modalRoot').childElementCount) return;   /* modals close themselves */
+  if (emojiPopEl) { closeEmojiPop(); return; }
+  if (!mentionPop.hidden) { hideMentionPop(); return; }
+  if (state.replyTo) { state.replyTo = null; renderReplyBar(); return; }
+  if (settingsPanel.classList.contains('open')) { closeSettings(); return; }
+  if (sidebar.classList.contains('open') || membersPanel.classList.contains('open')) closeDrawers();
+}
 
 /* =====================================================================
    BOOT
 ===================================================================== */
-(function init() {
-  document.title = 'Slate';
-  setTheme(localStorage.getItem(LS.theme) || 'dark', false);
-  setAccent(localStorage.getItem(LS.accent) || '#ff5c38');
+(function boot() {
+  setTheme(localStorage.getItem(LS.theme) === 'light' ? 'light' : 'dark', false);
+  const savedAccent = localStorage.getItem(LS.accent);
+  setAccent(savedAccent && /^#[0-9a-f]{6}$/i.test(savedAccent) ? savedAccent : ACCENTS[0].hex);
   buildSwatches();
+
   wireAuth();
-  startPingMeter();
-  updateTitle();
+  wireApp();
+
   const flash = sessionStorage.getItem('slate:flash');
-  if (flash) { sessionStorage.removeItem('slate:flash'); toast(flash); }
+  if (flash) {
+    sessionStorage.removeItem('slate:flash');
+    setTimeout(() => toast(flash), 500);
+  }
+  startPingMeter();
+
+  /* session restore — survives refresh */
   const token = localStorage.getItem(LS.token);
   if (token) {
     api('GET', '/api/auth/me')
-      .then((d) => enterApp(d.user, token))
+      .then(d => enterApp(d.user, token))
       .catch(() => { localStorage.removeItem(LS.token); });
   }
 })();
