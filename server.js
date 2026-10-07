@@ -1,7 +1,7 @@
 'use strict';
 /* =====================================================================
-   slate — server.js  (Express + Socket.io + MongoDB Atlas)
-   All data now lives in MongoDB → survives every restart & redeploy.
+   slate — server.js  (Express + Socket.io + MongoDB)
+   Serves the frontend from ./public so the whole app runs on one port.
    ===================================================================== */
 
 const http = require('http');
@@ -35,17 +35,15 @@ const PORT = Number(process.env.PORT) || 4000;
 if (!process.env.JWT_SECRET) console.warn('[slate] WARNING: JWT_SECRET is not set — using an insecure dev secret.');
 const SECRET = process.env.JWT_SECRET || 'dev-secret-do-not-use-in-production';
 const clientOrigins = new Set(
-  (process.env.CLIENT_ORIGIN || 'http://localhost:5500').split(',').map(s => s.trim()).filter(Boolean)
+  (process.env.CLIENT_ORIGIN ||
+   'http://localhost:5500,http://localhost:4000,https://slate-e6hp.onrender.com')
+    .split(',').map(s => s.trim()).filter(Boolean)
 );
 const isDev = process.env.NODE_ENV !== 'production';
 const MONGODB_URI = process.env.MONGODB_URI || '';
 
-/* ---------- 2 · data store: MongoDB + small in-memory mirror ----------
-   Users and servers are mirrored in memory for instant reads and are
-   written back to Mongo on every change. Messages live ONLY in Mongo
-   (one document per message), so history can grow without limit.   */
+/* ---------- 2 · data store: MongoDB + small in-memory mirror ---------- */
 const db = { users: {}, servers: {} };
-
 let mongoClient = null, usersCol, serversCol, messagesCol;
 
 const clone = (o) => JSON.parse(JSON.stringify(o));
@@ -109,6 +107,13 @@ function inviteCode() {
   return code;
 }
 
+/* ---- reactions whitelist (kept identical on the client) ---- */
+const REACTION_EMOJIS = new Set([
+  '👍','👎','❤️','😂','😮','😢','🙏','🔥','🎉','😡','💯','✅','❌','👀','🤔','😅',
+  '🤝','👋','🤖','⭐','💜','👏','😭','😍','😎','🥳','💤','🚀','☕','🍕','🎮','🎵',
+  '📢','💡','🐱','🐶','🦀','🐙'
+]);
+
 /* ---- message helpers ---- */
 async function messagePayload(m, replyMap) {
   const out = { ...m, author: publicUser(getUser(m.authorId)) };
@@ -124,7 +129,7 @@ async function messagePayload(m, replyMap) {
 }
 function parseMentions(text, contextUserIds) {
   const found = new Set();
-  const re = /@([a-zA-Z0-9_]{3,20})/g;
+  const re = /@([a-zA-Z0-9_]{3,20})(?![a-zA-Z0-9_])/g;
   let m;
   while ((m = re.exec(String(text || '')))) {
     const u = findUserByUsername(m[1]);
@@ -150,6 +155,16 @@ function notifyMentions(message, place) {
         ? { type: 'channel', channelId: place.channelId }
         : { type: 'dm', userIds: place.userIds }
     });
+  }
+}
+/* broadcast an event to everyone who can see a given message's room */
+function broadcastToRoom(m, event, ev) {
+  if (m.type === 'channel') {
+    const s = findServerByChannel(m.room);
+    if (s) io.to('server:' + s.id).emit(event, ev);
+  } else if (m.type === 'dm') {
+    const [a, b] = m.room.slice(3).split(':');
+    io.to('user:' + a).to('user:' + b).emit(event, ev);
   }
 }
 
@@ -193,8 +208,7 @@ const presence = {
   isOnline(userId) { return socketsByUser.has(userId); }
 };
 
-/* presence goes only to people who actually know this user
-   (friends + shared-server members) — not broadcast to the whole platform */
+/* presence goes only to people who actually know this user */
 function emitPresence(userId, online) {
   const ev = { userId, online };
   const targets = new Set();
@@ -205,7 +219,8 @@ function emitPresence(userId, online) {
   }
   for (const tid of targets) io.to('user:' + tid).emit('presence:update', ev);
 }
-/* ---------- 4 · express + cors ---------- */
+
+/* ---------- 4 · express + cors + static frontend ---------- */
 const app = express();
 const httpServer = http.createServer(app);
 
@@ -216,6 +231,7 @@ const originFn = (origin, cb) => {
 };
 app.use(cors({ origin: originFn, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }));
 app.use(express.json({ limit: '2mb' }));
+app.use(express.static(path.join(__dirname, 'public')));
 
 if (isDev) {
   app.use((req, res, next) => { res.on('finish', () => console.log(req.method, req.originalUrl, res.statusCode)); next(); });
@@ -257,14 +273,17 @@ io.on('connection', (socket) => {
     const p = payload || {};
     const text = typeof p.text === 'string' ? p.text.trim().slice(0, 2000) : '';
     const image = validImage(p.image) ? p.image : null;
-    if (!text && !image) return;
-    if (Date.now() - (lastMessageAt.get(user.id) || 0) < 120) return;
+    if (!text && !image) { if (typeof ack === 'function') ack({ ok: false }); return; }
+    if (Date.now() - (lastMessageAt.get(user.id) || 0) < 120) {
+      if (typeof ack === 'function') ack({ ok: false, reason: 'rate' });
+      return;
+    }
     lastMessageAt.set(user.id, Date.now());
 
     try {
       if (p.roomType === 'channel') {
         const server = findServerByChannel(p.target);
-        if (!server || !server.memberIds.includes(user.id)) return;
+        if (!server || !server.memberIds.includes(user.id)) { if (typeof ack === 'function') ack({ ok: false }); return; }
         let replyDoc = null;
         if (p.replyTo) {
           const r = await findMessageById(p.replyTo);
@@ -274,7 +293,7 @@ io.on('connection', (socket) => {
         const message = {
           id: uid(), type: 'channel', room: p.target, authorId: user.id,
           text, image, replyTo: replyDoc ? replyDoc.id : null, deleted: false,
-          mentions: parseMentions(text, server.memberIds), createdAt: now()
+          reactions: {}, mentions: parseMentions(text, server.memberIds), createdAt: now()
         };
         await insertMessage(message);
         io.to('server:' + server.id).emit('message:new', {
@@ -286,7 +305,7 @@ io.on('connection', (socket) => {
 
       } else if (p.roomType === 'dm') {
         const peer = getUser(p.target);
-        if (!peer || !user.friends.includes(peer.id)) return;
+        if (!peer || !user.friends.includes(peer.id)) { if (typeof ack === 'function') ack({ ok: false }); return; }
         let replyDoc = null;
         if (p.replyTo) {
           const r = await findMessageById(p.replyTo);
@@ -295,7 +314,7 @@ io.on('connection', (socket) => {
         const message = {
           id: uid(), type: 'dm', room: dmRoomKey(user.id, peer.id), authorId: user.id,
           text, image, replyTo: replyDoc ? replyDoc.id : null, deleted: false,
-          mentions: parseMentions(text, [user.id, peer.id]), createdAt: now()
+          reactions: {}, mentions: parseMentions(text, [user.id, peer.id]), createdAt: now()
         };
         await insertMessage(message);
         io.to('user:' + user.id).to('user:' + peer.id).emit('message:new', {
@@ -311,6 +330,38 @@ io.on('connection', (socket) => {
     }
   });
 
+  /* ---- edit your own message ---- */
+  socket.on('message:edit', async (payload, ack) => {
+    const user = me(); if (!user) return;
+    const p = payload || {};
+    const text = typeof p.text === 'string' ? p.text.trim().slice(0, 2000) : '';
+    if (!p.id || !text) { if (typeof ack === 'function') ack({ ok: false }); return; }
+    try {
+      const m = await findMessageById(p.id);
+      if (!m || m.deleted || m.authorId !== user.id) { if (typeof ack === 'function') ack({ ok: false }); return; }
+      if (!text && !m.image) { if (typeof ack === 'function') ack({ ok: false }); return; }
+      if (m.type === 'channel') {
+        const server = findServerByChannel(m.room);
+        if (!server || !server.memberIds.includes(user.id)) { if (typeof ack === 'function') ack({ ok: false }); return; }
+        m.mentions = parseMentions(text, server.memberIds);
+      } else if (m.type === 'dm') {
+        const [a, b] = m.room.slice(3).split(':');
+        if (user.id !== a && user.id !== b) { if (typeof ack === 'function') ack({ ok: false }); return; }
+        m.mentions = parseMentions(text, [a, b]);
+      } else return;
+      m.text = text;
+      m.editedAt = now();
+      await replaceMessage(m);
+      broadcastToRoom(m, 'message:update', {
+        id: m.id, type: m.type, room: m.room, text: m.text, editedAt: m.editedAt, mentions: m.mentions
+      });
+      if (typeof ack === 'function') ack({ ok: true });
+    } catch (e) {
+      console.warn('[slate] message edit failed:', e.message);
+      if (typeof ack === 'function') ack({ ok: false });
+    }
+  });
+
   socket.on('message:delete', async (payload) => {
     const user = me(); if (!user) return;
     try {
@@ -321,17 +372,43 @@ io.on('connection', (socket) => {
         const server = findServerByChannel(m.room);
         if (!server || !server.memberIds.includes(user.id)) return;
         if (m.authorId !== user.id && server.ownerId !== user.id) return;
-        m.deleted = true; m.text = ''; m.image = null; m.replyTo = null; m.mentions = [];
-        await replaceMessage(m);
-        io.to('server:' + server.id).emit('message:delete', { id: m.id, type: 'channel', room: m.room });
       } else if (m.type === 'dm') {
         const [a, b] = m.room.slice(3).split(':');
         if (user.id !== a && user.id !== b) return;
-        m.deleted = true; m.text = ''; m.image = null; m.replyTo = null; m.mentions = [];
-        await replaceMessage(m);
-        io.to('user:' + a).to('user:' + b).emit('message:delete', { id: m.id, type: 'dm', room: m.room });
-      }
+      } else return;
+
+      m.deleted = true; m.text = ''; m.image = null; m.replyTo = null; m.mentions = []; m.reactions = {};
+      await replaceMessage(m);
+      broadcastToRoom(m, 'message:delete', { id: m.id, type: m.type, room: m.room });
     } catch (e) { console.warn('[slate] message delete failed:', e.message); }
+  });
+
+  /* ---- emoji reactions ---- */
+  socket.on('reaction:toggle', async (payload) => {
+    const user = me(); if (!user) return;
+    const p = payload || {};
+    const emoji = String(p.emoji || '');
+    if (!REACTION_EMOJIS.has(emoji)) return;
+    try {
+      const m = await findMessageById(p.messageId);
+      if (!m || m.deleted) return;
+      if (m.type === 'channel') {
+        const server = findServerByChannel(m.room);
+        if (!server || !server.memberIds.includes(user.id)) return;
+      } else if (m.type === 'dm') {
+        const [a, b] = m.room.slice(3).split(':');
+        if (user.id !== a && user.id !== b) return;
+      } else return;
+
+      m.reactions = m.reactions || {};
+      const list = m.reactions[emoji] || [];
+      const i = list.indexOf(user.id);
+      if (i >= 0) list.splice(i, 1); else list.push(user.id);
+      if (list.length) m.reactions[emoji] = list; else delete m.reactions[emoji];
+
+      await replaceMessage(m);
+      broadcastToRoom(m, 'reaction:update', { id: m.id, type: m.type, room: m.room, reactions: m.reactions });
+    } catch (e) { console.warn('[slate] reaction failed:', e.message); }
   });
 
   socket.on('typing', (payload) => {
@@ -405,7 +482,6 @@ async function history(req, type, room) {
   const docs = await messagesCol.find(q).sort({ createdAt: -1 }).limit(50).toArray();
   const list = docs.map(stripDoc).reverse();
 
-  // batch-fetch reply previews in one query
   const replyIds = [...new Set(list.map(m => m.replyTo).filter(Boolean))];
   const replyMap = {};
   if (replyIds.length) {
@@ -441,7 +517,7 @@ app.post('/api/auth/signup', wrap(async (req, res) => {
   db.users[user.id] = user;
   await upsertUser(user);
   await ensureOfficialMembership(user);
-  res.json({ token: issueToken(user), user: selfUser(user) });
+  res.json({ token: issueToken(user), user: selfUser(user) }));
 }));
 
 app.post('/api/auth/login', wrap(async (req, res) => {
@@ -452,7 +528,7 @@ app.post('/api/auth/login', wrap(async (req, res) => {
     return bad(res, 401, 'Wrong credentials — check your email/username and password');
   }
   await ensureOfficialMembership(user);
-  res.json({ token: issueToken(user), user: selfUser(user) });
+  res.json({ token: issueToken(user), user: selfUser(user) }));
 }));
 
 app.get('/api/auth/me', auth, (req, res) => res.json({ user: selfUser(req.user) }));
@@ -581,7 +657,7 @@ app.post('/api/friends/decline', auth, wrap(async (req, res) => {
 app.post('/api/friends/cancel', auth, wrap(async (req, res) => {
   const other = getUser(req.body && req.body.userId);
   const me = req.user;
-  if (!other || !me.outgoing.includes(other.id)) return bad(res, 400, 'No outgoing request to that user');
+  if (!other || !me.outgoing.includes(other.id)) return bad(res, 400, 'No outgoing request to cancel');
   me.outgoing = me.outgoing.filter(id => id !== other.id);
   other.incoming = other.incoming.filter(id => id !== me.id);
   await upsertUser(me);
@@ -673,11 +749,25 @@ app.post('/api/servers/:id/channels', auth, wrap(async (req, res) => {
   res.json({ channel });
 }));
 
+app.delete('/api/servers/:id/channels/:channelId', auth, wrap(async (req, res) => {
+  const s = db.servers[req.params.id];
+  if (!s) return bad(res, 404, 'Server not found');
+  if (s.official) return bad(res, 403, 'The community server can’t be edited by anyone');
+  if (s.ownerId !== req.user.id) return bad(res, 403, 'Only the server owner can delete channels');
+  if (!s.channels.some(c => c.id === req.params.channelId)) return bad(res, 404, 'Channel not found');
+  if (s.channels.length <= 1) return bad(res, 400, 'A server needs at least one channel');
+  s.channels = s.channels.filter(c => c.id !== req.params.channelId);
+  await upsertServer(s);
+  await messagesCol.deleteMany({ type: 'channel', room: req.params.channelId });
+  io.to('server:' + s.id).emit('server:sync', { serverId: s.id });
+  res.json({ ok: true });
+}));
+
 app.delete('/api/servers/:id/leave', auth, wrap(async (req, res) => {
   const s = db.servers[req.params.id];
   if (!s) return bad(res, 404, 'Server not found');
   const me = req.user;
-  if (!s.memberIds.includes(me.id)) return bad(res, 400, 'You are not in that server');
+  if (!s.memberIds.includes(me.id)) return bad(res, 400, 'You are not in this server');
   s.memberIds = s.memberIds.filter(id => id !== me.id);
   if (s.memberIds.length === 0) {
     if (!s.official) {
@@ -732,12 +822,12 @@ async function shutdown() {
   process.exit(0);
 }
 process.on('SIGINT', shutdown);
-process.on('SIGTERM', shutdown); // Render sends this before stopping
+process.on('SIGTERM', shutdown);
 
 initMongo()
   .then(async () => {
     await ensureOfficialServer();
-    httpServer.listen(PORT, () => console.log(`slate-server listening on :${PORT} (mongo-backed)`));
+    httpServer.listen(PORT, () => console.log(`slate-server listening on :${PORT} (mongo-backed, serving ./public)`));
   })
   .catch((e) => {
     console.error('[slate] failed to start:', e.message);
