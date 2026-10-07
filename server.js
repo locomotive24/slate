@@ -517,7 +517,7 @@ app.post('/api/auth/signup', wrap(async (req, res) => {
   db.users[user.id] = user;
   await upsertUser(user);
   await ensureOfficialMembership(user);
-  res.json({ token: issueToken(user), user: selfUser(user) }));
+  res.json({ token: issueToken(user), user: selfUser(user) });
 }));
 
 app.post('/api/auth/login', wrap(async (req, res) => {
@@ -528,7 +528,7 @@ app.post('/api/auth/login', wrap(async (req, res) => {
     return bad(res, 401, 'Wrong credentials — check your email/username and password');
   }
   await ensureOfficialMembership(user);
-  res.json({ token: issueToken(user), user: selfUser(user) }));
+  res.json({ token: issueToken(user), user: selfUser(user) });
 }));
 
 app.get('/api/auth/me', auth, (req, res) => res.json({ user: selfUser(req.user) }));
