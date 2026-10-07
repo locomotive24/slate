@@ -620,3 +620,13 @@ a { color: var(--accent); }
   .emoji-pop { grid-template-columns: repeat(6, 34px); }
   .edit-input { font-size: 16px; }
 }
+
+/* HARD CAPS — the composer can never outgrow the screen */
+.composer-row textarea {
+  max-height: 140px !important;
+  overflow-y: auto;
+}
+.chat {
+  min-height: 0;
+  overflow: hidden;
+}
