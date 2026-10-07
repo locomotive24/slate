@@ -4,6 +4,7 @@
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#101013">
+<meta name="description" content="slate — a quiet grey place to talk. Realtime rooms, friends, DMs.">
 <title>Slate</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -34,6 +35,8 @@
   <symbol id="i-arrow-down" viewBox="0 0 24 24"><path d="M12 5v14M6 13l6 6 6-6"/></symbol>
   <symbol id="i-home" viewBox="0 0 24 24"><path d="M4 11l8-7 8 7"/><path d="M6 10v9a1 1 0 0 0 1 1h10a1 1 0 0 0 1-1v-9"/></symbol>
   <symbol id="i-reply" viewBox="0 0 24 24"><path d="M9 15 4 10l5-5"/><path d="M4 10h9a7 7 0 0 1 7 7v2"/></symbol>
+  <symbol id="i-edit" viewBox="0 0 24 24"><path d="M17 3a2.8 2.8 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5L17 3Z"/></symbol>
+  <symbol id="i-smile" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M8.5 14.5c1 1.2 2.2 1.8 3.5 1.8s2.5-.6 3.5-1.8"/><path d="M9 9.5h.01M15 9.5h.01"/></symbol>
 </svg>
 
 <!-- ============ AUTH ============ -->
@@ -96,14 +99,14 @@
 <!-- ============ APP ============ -->
 <main id="appView" class="app" hidden>
   <nav class="rail">
-    <button class="rail-btn rail-home" id="railHome" title="Home"></button>
+    <button class="rail-btn rail-home" id="railHome" title="Home" type="button"></button>
     <div class="rail-sep"></div>
     <div class="rail-scroll" id="railServers"></div>
-    <button class="rail-add" id="railAdd" title="Create or join a server"></button>
+    <button class="rail-add" id="railAdd" title="Create or join a server" type="button"></button>
     <div class="rail-gap"></div>
-    <button class="rail-btn" id="railFriends" title="Friends"></button>
-    <button class="rail-btn" id="railTheme" title="Toggle theme"></button>
-    <button class="rail-avatar" id="railAvatar" title="You — open settings"></button>
+    <button class="rail-btn" id="railFriends" title="Friends" type="button"></button>
+    <button class="rail-btn" id="railTheme" title="Toggle theme" type="button"></button>
+    <button class="rail-avatar" id="railAvatar" title="You — open settings" type="button"></button>
   </nav>
 
   <aside class="sidebar" id="sidebar">
@@ -113,12 +116,12 @@
 
   <section class="chat" id="chatSection">
     <header class="chat-head">
-      <button class="icon-btn mobile-only" id="menuBtn" title="Menu"></button>
+      <button class="icon-btn mobile-only" id="menuBtn" title="Menu" type="button"></button>
       <h2 class="chat-title" id="chatTitle"></h2>
       <nav class="home-tabs" id="homeTabs"></nav>
       <span class="chat-meta mono" id="chatMeta"></span>
       <span class="head-gap"></span>
-      <button class="icon-btn" id="membersToggle" title="Toggle members"></button>
+      <button class="icon-btn" id="membersToggle" title="Toggle members" type="button"></button>
     </header>
 
     <section class="home-view" id="homeView">
@@ -133,8 +136,8 @@
         <div class="empty-mark">slate<span class="wordmark-dot"></span></div>
         <p class="mono empty-hint" id="emptyHint"></p>
         <div class="empty-cta">
-          <button class="btn btn-ghost btn-sm" id="emptyCtaFriends">Find friends</button>
-          <button class="btn btn-ghost btn-sm" id="emptyCtaServer">Create a server</button>
+          <button class="btn btn-ghost btn-sm" id="emptyCtaFriends" type="button">Find friends</button>
+          <button class="btn btn-ghost btn-sm" id="emptyCtaServer" type="button">Create a server</button>
         </div>
       </div>
     </div>
@@ -146,25 +149,26 @@
         <div class="reply-bar" id="replyBar" hidden>
           <span id="replyIconSlot"></span>
           <div class="reply-info" id="replyInfo"></div>
-          <button class="icon-btn" id="replyCancel" title="Cancel reply"></button>
+          <button class="icon-btn" id="replyCancel" title="Cancel reply" type="button"></button>
         </div>
         <div class="pending-image" id="pendingImageRow" hidden>
           <img id="pendingImageThumb" alt="Attached image">
           <span class="pending-label mono">IMAGE READY — SENDS WITH YOUR NEXT MESSAGE</span>
-          <button class="icon-btn" id="pendingImageRemove" title="Remove image"></button>
+          <button class="icon-btn" id="pendingImageRemove" title="Remove image" type="button"></button>
         </div>
         <div class="composer-row">
-          <button class="icon-btn composer-extra" id="attachBtn" title="Attach an image"></button>
+          <button class="icon-btn composer-extra" id="attachBtn" title="Attach an image" type="button"></button>
+          <button class="icon-btn composer-extra" id="emojiBtn" title="Emoji" type="button"></button>
           <button class="gif-btn mono" id="gifBtn" type="button" hidden>GIF</button>
           <textarea id="composerInput" rows="1" placeholder="Message…" maxlength="2000"></textarea>
-          <button class="btn btn-accent btn-send" id="sendBtn" title="Send"></button>
+          <button class="btn btn-accent btn-send" id="sendBtn" title="Send" type="button"></button>
         </div>
         <input type="file" id="imageFile" accept="image/*" hidden>
         <div class="mention-pop" id="mentionPop" hidden></div>
       </div>
     </footer>
 
-    <button class="jump-btn" id="jumpBtn" title="Jump to latest"></button>
+    <button class="jump-btn" id="jumpBtn" title="Jump to latest" type="button"></button>
   </section>
 
   <aside class="members" id="membersPanel">
@@ -178,7 +182,7 @@
 <aside class="settings" id="settingsPanel">
   <header class="settings-head">
     <h3>Settings</h3>
-    <button class="icon-btn" id="settingsClose" title="Close"></button>
+    <button class="icon-btn" id="settingsClose" title="Close" type="button"></button>
   </header>
   <div class="settings-scroll">
     <section class="settings-sec">
@@ -190,7 +194,7 @@
             <span>Upload picture</span>
             <input type="file" id="avatarFile" accept="image/*" hidden>
           </label>
-          <button class="btn btn-ghost btn-sm" id="avatarRemove">Remove</button>
+          <button class="btn btn-ghost btn-sm" id="avatarRemove" type="button">Remove</button>
         </div>
       </div>
       <label class="field"><span class="field-label mono">USERNAME</span>
@@ -204,7 +208,7 @@
         <textarea id="bioInput" rows="3" maxlength="280" placeholder="Say a little about yourself"></textarea>
         <span class="field-hint mono"><span id="bioCount">0</span>/280</span>
       </label>
-      <button class="btn btn-accent" id="profileSave">Save profile</button>
+      <button class="btn btn-accent" id="profileSave" type="button">Save profile</button>
     </section>
 
     <section class="settings-sec">
@@ -220,7 +224,7 @@
     <section class="settings-sec">
       <h4 class="sec-title mono">ACCOUNT</h4>
       <dl class="account-facts mono" id="accountFacts"></dl>
-      <button class="btn btn-danger" id="logoutBtn">Log out</button>
+      <button class="btn btn-danger" id="logoutBtn" type="button">Log out</button>
       <p class="field-hint mono" style="margin-top:14px">CONNECTED TO<br><span id="settingsApi"></span></p>
     </section>
   </div>
