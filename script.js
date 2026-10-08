@@ -21,8 +21,8 @@ function $$(sel, root = document) { return [...root.querySelectorAll(sel)]; }
    STATE
 ===================================================================== */
 const HISTORY_PAGE = 50;
-const MSG_CAP = 300;               // trim in-memory messages past this (only when pinned)
-const MSG_KEEP = 150;              // what we keep after a trim
+const MSG_CAP = 300;
+const MSG_KEEP = 150;
 const ACCENTS = [
   { name: 'Ember',  hex: '#ff5c38' },
   { name: 'Amber',  hex: '#ffb224' },
@@ -487,16 +487,22 @@ function trimMessagesIfNeeded() {
   chatScroll.scrollTop = chatScroll.scrollHeight;
 }
 
+/* throttled loaders — trailing edge, so an event arriving during the
+   cooldown is DEFERRED, never dropped (this is what made member lists
+   go stale until a refresh) */
 let lastFriendsFetch = 0, lastServersFetch = 0, lastResyncAt = 0;
+let friendsFetchTimer = null, serversFetchTimer = null;
 function loadFriendsThrottled() {
-  if (Date.now() - lastFriendsFetch < 2000) return;
-  lastFriendsFetch = Date.now();
-  loadFriends();
+  const due = Date.now() - lastFriendsFetch;
+  if (due >= 2000) { lastFriendsFetch = Date.now(); loadFriends(); return; }
+  clearTimeout(friendsFetchTimer);
+  friendsFetchTimer = setTimeout(() => { lastFriendsFetch = Date.now(); loadFriends(); }, 2100 - due);
 }
 function loadServersThrottled() {
-  if (Date.now() - lastServersFetch < 2000) return;
-  lastServersFetch = Date.now();
-  loadServers();
+  const due = Date.now() - lastServersFetch;
+  if (due >= 2000) { lastServersFetch = Date.now(); loadServers(); return; }
+  clearTimeout(serversFetchTimer);
+  serversFetchTimer = setTimeout(() => { lastServersFetch = Date.now(); loadServers(); }, 2100 - due);
 }
 
 function closeDrawers() {
@@ -757,7 +763,7 @@ function onUserUpdate({ user }) {
     state.me = { ...state.me, ...user };
   }
   state.friends.friends = state.friends.friends.map(f => (f.id === user.id ? { ...f, ...user } : f));
-  loadServersThrottled();   // refresh member lists that show this user
+  loadServersThrottled();   /* refresh member lists that show this user */
   requestRender();
 }
 function onPresence({ userId, online }) {
@@ -894,11 +900,11 @@ const isCompact = (prev, m) =>
 const dayChanged = (prev, m) =>
   !prev || new Date(prev.createdAt).toDateString() !== new Date(m.createdAt).toDateString();
 
+/* DMs: only your own messages. Channels: yours, or any if you own the server. */
 function canDeleteMessage(m) {
   if (m.deleted) return false;
   if (m.authorId === state.me.id) return true;
   const r = state.route;
-  if (r && r.type === 'dm') return true;
   if (r && r.type === 'channel') {
     const s = state.servers.find(x => x.id === r.serverId);
     if (s && s.ownerId === state.me.id) return true;
@@ -1290,11 +1296,18 @@ function renderRail() {
     return b;
   }));
   const pending = state.friends.incoming.length;
+  /* friends button badge */
   let fb = railFriends.querySelector('.rail-badge');
   if (pending) {
     if (!fb) { fb = el('span', 'rail-badge mono'); railFriends.append(fb); }
     fb.textContent = pending > 9 ? '9+' : String(pending);
   } else if (fb) fb.remove();
+  /* home button badge */
+  let hb = railHome.querySelector('.rail-badge');
+  if (pending) {
+    if (!hb) { hb = el('span', 'rail-badge mono'); railHome.append(hb); }
+    hb.textContent = pending > 9 ? '9+' : String(pending);
+  } else if (hb) hb.remove();
 }
 
 /* =====================================================================
@@ -1971,7 +1984,7 @@ function openEmojiPop(anchor, onPick) {
 }
 
 /* =====================================================================
-   LIGHTBOX / GIF PICKER / QUICK SWITCHER
+   LIGHTBOX / KLIPY GIF+STICKER PICKER / QUICK SWITCHER
 ===================================================================== */
 function openLightbox(src) {
   const img = el('img', 'lightbox-img');
@@ -1980,39 +1993,53 @@ function openLightbox(src) {
 }
 
 function openGifModal() {
+  const wrap = el('div', 'gif-wrap');
+
+  const seg = el('div', 'seg gif-tabs');
+  const gifTab = el('button', 'seg-btn is-active', 'GIFs');
+  const stickerTab = el('button', 'seg-btn', 'Stickers');
+  gifTab.type = 'button'; stickerTab.type = 'button';
+  seg.append(gifTab, stickerTab);
+
   const search = el('input', 'gif-search');
-  search.placeholder = 'Search Tenor…';
+  search.placeholder = 'Search KLIPY…';      /* required attribution */
   search.spellcheck = false;
   const status = el('p', 'gif-status mono', 'LOADING…');
   const grid = el('div', 'gif-grid');
-  const wrap = el('div', 'gif-wrap');
-  wrap.append(search, status, grid);
+  const credit = el('p', 'gif-credit mono', 'POWERED BY KLIPY');
+  wrap.append(seg, search, status, grid, credit);
+
   const { close } = openModal({ title: 'Pick a GIF', body: wrap, actions: [{ label: 'Cancel' }] });
 
+  let kind = 'gifs';
   let deb = null, seq = 0;
+
   async function load(q) {
     const my = ++seq;
     status.textContent = 'LOADING…';
     grid.replaceChildren();
     try {
-      const d = await api('GET', '/api/gifs/search?q=' + encodeURIComponent(q));
+      const locale = ((navigator.language || 'en').split('-')[1] || 'us').toLowerCase();
+      const d = await api('GET', '/api/gifs/search?kind=' + kind +
+        '&locale=' + encodeURIComponent(locale) + '&q=' + encodeURIComponent(q));
       if (my !== seq) return;
       if (!d.configured) { status.textContent = 'GIFS ARE NOT CONFIGURED ON THIS SERVER'; return; }
       status.textContent = d.gifs.length ? '' : 'NO RESULTS';
       for (const g of d.gifs) {
         const b = el('button', 'gif-item');
         b.type = 'button';
-        b.title = g.desc || '';
+        b.title = g.title || '';
         const img = el('img');
         img.src = g.preview || g.url;
-        img.alt = g.desc || 'gif';
+        img.alt = g.title || 'gif';
         img.loading = 'lazy';
         b.append(img);
         b.addEventListener('click', () => {
           state.pendingImage = g.url;
           renderPendingImage();
           close();
-          toast('GIF attached — it sends with your next message');
+          toast((kind === 'stickers' ? 'Sticker' : 'GIF') + ' attached — sends with your next message');
+          if (g.slug) api('POST', '/api/gifs/share', { slug: g.slug, q, kind }).catch(() => {});
         });
         grid.append(b);
       }
@@ -2020,9 +2047,18 @@ function openGifModal() {
       if (my === seq) status.textContent = e.message.toUpperCase();
     }
   }
+
+  const setKind = (k) => {
+    kind = k;
+    gifTab.classList.toggle('is-active', k === 'gifs');
+    stickerTab.classList.toggle('is-active', k === 'stickers');
+    load(search.value.trim());
+  };
+  gifTab.addEventListener('click', () => setKind('gifs'));
+  stickerTab.addEventListener('click', () => setKind('stickers'));
   search.addEventListener('input', () => {
     clearTimeout(deb);
-    deb = setTimeout(() => load(search.value.trim()), 350);
+    deb = setTimeout(() => load(search.value.trim()), 400);
   });
   load('');
   setTimeout(() => search.focus(), 60);
@@ -2444,6 +2480,52 @@ function wireApp() {
   });
 
   document.addEventListener('keydown', globalKeydown);
+
+  /* ---- drag & drop image attach ---- */
+  let dragDepth = 0;
+  chatSection.addEventListener('dragenter', (e) => {
+    if (!state.route) return;
+    e.preventDefault();
+    dragDepth++;
+    chatSection.classList.add('dragging');
+  });
+  chatSection.addEventListener('dragover', (e) => { if (state.route) e.preventDefault(); });
+  chatSection.addEventListener('dragleave', () => {
+    dragDepth = Math.max(0, dragDepth - 1);
+    if (!dragDepth) chatSection.classList.remove('dragging');
+  });
+  chatSection.addEventListener('drop', (e) => {
+    e.preventDefault();
+    dragDepth = 0;
+    chatSection.classList.remove('dragging');
+    if (!state.route) return;
+    const file = [...((e.dataTransfer && e.dataTransfer.files) || [])][0];
+    if (file) handleImageFile(file);
+  });
+
+  /* ---- paste an image straight into the chat ---- */
+  document.addEventListener('paste', (e) => {
+    if (!state.route || !state.me) return;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA') && ae !== composerInput) return;
+    const item = [...((e.clipboardData && e.clipboardData.items) || [])].find(i => i.type.startsWith('image/'));
+    if (item) {
+      e.preventDefault();
+      handleImageFile(item.getAsFile());
+    }
+  });
+
+  /* ---- start typing anywhere → jump into the composer ---- */
+  document.addEventListener('keydown', (e) => {
+    if (!state.me || appView.hidden || !state.route) return;
+    if ($('#modalRoot').childElementCount) return;
+    if (settingsPanel.classList.contains('open')) return;
+    if (e.ctrlKey || e.metaKey || e.altKey) return;
+    if (e.key.length !== 1) return;
+    const ae = document.activeElement;
+    if (ae && (ae.tagName === 'INPUT' || ae.tagName === 'TEXTAREA' || ae.isContentEditable)) return;
+    composerInput.focus();
+  });
 }
 
 function globalKeydown(e) {
