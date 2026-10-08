@@ -1,7 +1,7 @@
 'use strict';
 /* =====================================================================
    slate — server.js  (Express + Socket.io + MongoDB)
-   Serves the frontend from ./public so the whole app runs on one port.
+   API + realtime backend. Frontend lives on GitHub Pages.
    ===================================================================== */
 
 const http = require('http');
@@ -36,7 +36,7 @@ if (!process.env.JWT_SECRET) console.warn('[slate] WARNING: JWT_SECRET is not se
 const SECRET = process.env.JWT_SECRET || 'dev-secret-do-not-use-in-production';
 const clientOrigins = new Set(
   (process.env.CLIENT_ORIGIN ||
-   'http://localhost:5500,http://localhost:4000,https://slate-e6hp.onrender.com')
+   'https://locomotive24.github.io,http://localhost:5500,http://localhost:4000,https://slate-e6hp.onrender.com')
     .split(',').map(s => s.trim()).filter(Boolean)
 );
 const isDev = process.env.NODE_ENV !== 'production';
@@ -141,7 +141,7 @@ function validImage(img) {
   if (img == null) return true;
   if (typeof img !== 'string') return false;
   if (img.startsWith('data:image/') && img.length < 600000) return true;
-  if (/^https:\/\/\S+$/.test(img) && img.length < 600) return true; // Tenor GIF urls
+  if (/^https:\/\/\S+$/.test(img) && img.length < 600) return true; // KLIPY media urls
   return false;
 }
 function notifyMentions(message, place) {
@@ -182,11 +182,14 @@ async function ensureOfficialServer() {
   }
   return s;
 }
+/* every join broadcasts server:sync so all member lists stay live */
 async function ensureOfficialMembership(user) {
   const s = await ensureOfficialServer();
   if (!s.memberIds.includes(user.id)) {
     s.memberIds.push(user.id);
     await upsertServer(s);
+    syncRooms(user.id, 'server:' + s.id, true);
+    io.to('server:' + s.id).emit('server:sync', { serverId: s.id });
   }
 }
 
@@ -220,7 +223,7 @@ function emitPresence(userId, online) {
   for (const tid of targets) io.to('user:' + tid).emit('presence:update', ev);
 }
 
-/* ---------- 4 · express + cors + static frontend ---------- */
+/* ---------- 4 · express + cors ---------- */
 const app = express();
 const httpServer = http.createServer(app);
 
@@ -372,8 +375,8 @@ io.on('connection', (socket) => {
         if (!server || !server.memberIds.includes(user.id)) return;
         if (m.authorId !== user.id && server.ownerId !== user.id) return;
       } else if (m.type === 'dm') {
-        const [a, b] = m.room.slice(3).split(':');
-        if (user.id !== a && user.id !== b) return;
+        /* DMs: only the author can delete their own message */
+        if (m.authorId !== user.id) return;
       } else return;
 
       m.deleted = true; m.text = ''; m.image = null; m.replyTo = null; m.mentions = []; m.reactions = {};
@@ -563,28 +566,66 @@ app.patch('/api/me', auth, wrap(async (req, res) => {
   res.json({ user: selfUser(u) });
 }));
 
-/* ---- features + GIF search ---- */
-app.get('/api/features', auth, (req, res) => res.json({ gifs: !!process.env.TENOR_API_KEY }));
+/* ---- features + KLIPY GIF/sticker search ---- */
+const KLIPY_KEY = process.env.KLIPY_API_KEY || '';
+
+function klipyPick(file, size, formats) {
+  const group = (file && file[size]) || {};
+  for (const f of formats) {
+    const o = group[f];
+    if (o && o.url) return o.url;
+  }
+  return null;
+}
+
+app.get('/api/features', auth, (req, res) => res.json({ gifs: !!KLIPY_KEY }));
 
 app.get('/api/gifs/search', auth, wrap(async (req, res) => {
-  if (!process.env.TENOR_API_KEY) return res.json({ configured: false, gifs: [] });
-  const q = String(req.query.q || '').trim();
-  const url = new URL('https://tenor.googleapis.com/v2/' + (q ? 'search' : 'trending'));
-  url.searchParams.set('key', process.env.TENOR_API_KEY);
-  url.searchParams.set('client_key', 'slate');
-  url.searchParams.set('limit', '24');
+  if (!KLIPY_KEY) return res.json({ configured: false, gifs: [] });
+  const q = String(req.query.q || '').trim().slice(0, 80);
+  const kind = req.query.kind === 'stickers' ? 'stickers' : 'gifs';
+  const locale = String(req.query.locale || 'us').toLowerCase().slice(0, 2);
+  const url = new URL(`https://api.klipy.com/api/v1/${KLIPY_KEY}/${kind}/${q ? 'search' : 'trending'}`);
+  url.searchParams.set('page', '1');
+  url.searchParams.set('per_page', '24');
+  url.searchParams.set('customer_id', String(req.user.id));
+  url.searchParams.set('locale', locale);
+  url.searchParams.set('content_filter', 'medium');
   if (q) url.searchParams.set('q', q);
   try {
     const r = await fetch(url);
     const d = await r.json();
-    const gifs = (d.results || []).map(g => ({
-      id: g.id,
-      url: ((g.media_formats || {}).mediumgif || (g.media_formats || {}).gif || {}).url || '',
-      preview: ((g.media_formats || {}).tinygif || {}).url || '',
-      desc: g.content_description || ''
-    })).filter(g => g.url);
-    res.json({ configured: true, gifs });
-  } catch { res.json({ configured: true, gifs: [] }); }
+    const items = ((d && d.result && d.data && d.data.data) || [])
+      .map(g => ({
+        id: String(g.id || ''),
+        slug: String(g.slug || ''),
+        title: String(g.title || ''),
+        url: klipyPick(g.file, 'md', ['webp', 'gif', 'png']) || klipyPick(g.file, 'hd', ['webp', 'gif', 'png']),
+        preview: klipyPick(g.file, 'sm', ['webp', 'gif', 'jpg', 'png']) || klipyPick(g.file, 'xs', ['webp', 'gif', 'jpg', 'png'])
+      }))
+      .filter(g => g.url && g.slug);
+    res.json({ configured: true, gifs: items });
+  } catch (e) {
+    res.json({ configured: true, gifs: [] });
+  }
+}));
+
+/* share trigger — fire-and-forget, feeds KLIPY personalization/analytics */
+app.post('/api/gifs/share', auth, wrap(async (req, res) => {
+  if (!KLIPY_KEY) return res.json({ ok: false });
+  const p = req.body || {};
+  const kind = p.kind === 'stickers' ? 'stickers' : 'gifs';
+  const slug = String(p.slug || '').replace(/[^a-zA-Z0-9-]/g, '').slice(0, 120);
+  const q = String(p.q || '').slice(0, 80);
+  if (!slug) return res.json({ ok: false });
+  try {
+    await fetch(`https://api.klipy.com/api/v1/${KLIPY_KEY}/${kind}/share/${slug}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ customer_id: String(req.user.id), q })
+    });
+  } catch { /* ignore */ }
+  res.json({ ok: true });
 }));
 
 /* ---- user search ---- */
@@ -826,7 +867,7 @@ process.on('SIGTERM', shutdown);
 initMongo()
   .then(async () => {
     await ensureOfficialServer();
-    httpServer.listen(PORT, () => console.log(`slate-server listening on :${PORT} (mongo-backed, serving ./public)`));
+    httpServer.listen(PORT, () => console.log(`slate-server listening on :${PORT} (mongo-backed)`));
   })
   .catch((e) => {
     console.error('[slate] failed to start:', e.message);
