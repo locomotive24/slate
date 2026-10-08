@@ -1,8 +1,8 @@
 {
-  "name": "slate",
-  "version": "1.1.0",
+  "name": "Slate",
+  "version": "1.3.0",
   "private": true,
-  "description": "slate — realtime chat (Express + Socket.io + MongoDB)",
+  "description": "Slate — A real-time chat",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
